@@ -1,5 +1,8 @@
 package com.strata.tv.ui.settings
 
+import android.app.Activity
+import android.content.Intent
+import android.os.Process
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,6 +63,9 @@ fun SettingsScreen(
     val settings by viewModel.settings.collectAsState()
     val sync by viewModel.syncProgress.collectAsState()
     val accountInfo by viewModel.accountInfo.collectAsState()
+    val backupMessage by viewModel.backupMessage.collectAsState()
+    val context = LocalContext.current
+    val activity = context as? Activity
     val isSyncing = sync !is SyncService.Progress.Idle &&
         sync !is SyncService.Progress.Done &&
         sync !is SyncService.Progress.Error
@@ -265,14 +272,73 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(20.dp))
 
+        SectionHeader("Backup & restore")
+        Card {
+            Column {
+                ListRow(
+                    headline = "Export backup",
+                    supporting = "Save login, preferences, favourites, continue watching and history on this device",
+                    accent = true,
+                    onClick = { viewModel.exportBackup() },
+                )
+                ListRow(
+                    headline = "Restore backup",
+                    supporting = "Load stream-backup.json from app storage or Download folder",
+                    onClick = { viewModel.importBackup() },
+                )
+                if (!backupMessage.isNullOrBlank()) {
+                    ListRow(
+                        headline = "Status",
+                        supporting = backupMessage!!,
+                        onClick = { viewModel.clearBackupMessage() },
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        SectionHeader("App")
+        Card {
+            Column {
+                ListRow(
+                    headline = "Restart app",
+                    supporting = "Close and reopen STREAM (keeps login and library)",
+                    accent = true,
+                    onClick = {
+                        val launch = context.packageManager
+                            .getLaunchIntentForPackage(context.packageName)
+                            ?.addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK,
+                            )
+                        if (launch != null) {
+                            context.startActivity(launch)
+                        }
+                        activity?.finishAffinity()
+                        Process.killProcess(Process.myPid())
+                    },
+                )
+                ListRow(
+                    headline = "Exit app",
+                    supporting = "Close STREAM completely",
+                    onClick = {
+                        activity?.finishAffinity()
+                        Process.killProcess(Process.myPid())
+                    },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
         SectionHeader("About")
         Card {
             Column {
                 ListRow(
-                    headline = "Strata IPTV",
+                    headline = "STREAM",
                     // Read straight from BuildConfig so this stays in
                     // sync with build.gradle.kts versionName forever.
-                    supporting = "v${com.strata.tv.BuildConfig.VERSION_NAME}",
+                    supporting = "v${com.strata.tv.BuildConfig.VERSION_NAME} (${com.strata.tv.BuildConfig.VERSION_CODE})",
                 )
                 ListRow(
                     headline = "EPG source",
@@ -468,9 +534,12 @@ private fun maskUrl(url: String): String =
     }
 
 private fun describeProvider(provider: ProviderConfig): String = when {
-    !provider.isConfigured -> "Not configured, run setup wizard"
+    !provider.isConfigured -> "Not configured — open login to connect"
     provider.providerId == "custom_m3u" -> maskUrl(provider.customM3uUrl)
-    else -> "${provider.providerId} | ${provider.username}"
+    else -> {
+        val name = provider.connectionName.ifBlank { "Xtream" }
+        "$name · ${provider.username} @ ${maskUrl(provider.host)}"
+    }
 }
 
 private fun formatExpiry(instant: Instant): String =

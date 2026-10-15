@@ -52,6 +52,17 @@ Debug APK:
 ./gradlew :app:assembleDebug
 ```
 
+## Safe updates (Downloader)
+
+Future APKs keep the same `applicationId` (`tv.stream.app`) and the same
+release signing certificate so Fire Stick installs **overwrite in place**
+without losing login, favourites or continue watching.
+
+| Doc | Purpose |
+|-----|---------|
+| [SAFE_UPDATES.md](SAFE_UPDATES.md) | In-place update rules + checklist |
+| [RELEASE_SIGNING.md](RELEASE_SIGNING.md) | Permanent keystore process |
+
 ## Documentation
 
 | Doc | Purpose |

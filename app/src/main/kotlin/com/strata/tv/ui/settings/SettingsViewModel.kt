@@ -2,6 +2,8 @@ package com.strata.tv.ui.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.strata.tv.data.backup.BackupRepository
+import com.strata.tv.data.backup.BackupResult
 import com.strata.tv.data.db.ChannelDao
 import com.strata.tv.data.db.MovieDao
 import com.strata.tv.data.db.SeriesDao
@@ -38,6 +40,7 @@ class SettingsViewModel @Inject constructor(
     private val libraryFilter: LibraryFilterRepository,
     private val movieEnrichment: MovieEnrichmentService,
     private val seriesEnrichment: SeriesEnrichmentService,
+    private val backupRepository: BackupRepository,
 ) : ViewModel() {
 
     /**
@@ -174,6 +177,38 @@ class SettingsViewModel @Inject constructor(
 
     fun setStopStreamInMenus(value: Boolean) {
         viewModelScope.launch { settingsRepo.setStopStreamInMenus(value) }
+    }
+
+    private val _backupMessage = MutableStateFlow<String?>(null)
+    val backupMessage: StateFlow<String?> = _backupMessage.asStateFlow()
+
+    fun clearBackupMessage() {
+        _backupMessage.value = null
+    }
+
+    fun exportBackup() {
+        viewModelScope.launch {
+            when (val result = backupRepository.exportBackup(includeCredentials = true)) {
+                is BackupResult.Success -> {
+                    val public = result.publicPath?.let { "\nAlso copied to: $it" }.orEmpty()
+                    _backupMessage.value =
+                        "Backup saved (${result.itemCount} items):\n${result.path}$public"
+                }
+                is BackupResult.Failure -> _backupMessage.value = "Backup failed: ${result.message}"
+            }
+        }
+    }
+
+    fun importBackup() {
+        viewModelScope.launch {
+            when (val result = backupRepository.importBackup()) {
+                is BackupResult.Success -> {
+                    _backupMessage.value =
+                        "Restore complete (${result.itemCount} items) from:\n${result.path}"
+                }
+                is BackupResult.Failure -> _backupMessage.value = "Restore failed: ${result.message}"
+            }
+        }
     }
 
     suspend fun testProvider(config: ProviderConfig): Boolean =

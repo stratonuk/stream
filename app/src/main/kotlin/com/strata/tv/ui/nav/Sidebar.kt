@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,7 +25,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -47,7 +47,8 @@ import com.strata.tv.ui.theme.StrataColors
 
 /**
  * Compact icon rail that expands to show labels when focused.
- * Monochrome selected state uses charcoal (#34363C).
+ * Selected / focused items use charcoal background with explicit white text
+ * so labels stay readable and vertically centred.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -64,7 +65,7 @@ fun Sidebar(
     }
     var railFocused by remember { mutableStateOf(false) }
     val railWidth by animateDpAsState(
-        targetValue = if (railFocused) 168.dp else 64.dp,
+        targetValue = if (railFocused) 176.dp else 64.dp,
         animationSpec = tween(durationMillis = 180),
         label = "sidebarWidth",
     )
@@ -85,7 +86,9 @@ fun Sidebar(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 6.dp, bottom = 20.dp),
+            modifier = Modifier
+                .padding(start = 6.dp, bottom = 20.dp)
+                .height(24.dp),
         ) {
             Icon(
                 imageVector = Icons.Outlined.LiveTv,
@@ -135,14 +138,20 @@ private fun SidebarItem(
     onClick: () -> Unit,
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val active = isSelected || isFocused
+    val highlighted = isSelected || isFocused
     val shape = RoundedCornerShape(10.dp)
+    // Explicit colours — TV Material contentColor is unreliable for labels
+    // sitting on charcoal selected backgrounds.
+    val labelColor = when {
+        highlighted -> StrataColors.TextPrimary
+        else -> StrataColors.TextSecondary
+    }
 
     Surface(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .height(42.dp)
+            .height(44.dp)
             .focusRequester(focusRequester)
             .then(
                 if (sidebarFocusRequester != null) {
@@ -154,31 +163,30 @@ private fun SidebarItem(
             .onFocusChanged { isFocused = it.isFocused },
         shape = ClickableSurfaceDefaults.shape(shape = shape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = when {
-                isSelected -> StrataColors.SelectedNav
-                else -> Color.Transparent
-            },
+            containerColor = if (isSelected) StrataColors.SelectedNav else Color.Transparent,
             focusedContainerColor = StrataColors.SelectedNav,
             pressedContainerColor = StrataColors.SurfaceOverlay,
-            contentColor = if (active) StrataColors.TextPrimary else StrataColors.TextTertiary,
+            contentColor = StrataColors.TextPrimary,
             focusedContentColor = StrataColors.TextPrimary,
         ),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp),
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
         ) {
             Icon(
-                imageVector = if (active) destination.selectedIcon else destination.icon,
+                imageVector = if (highlighted) destination.selectedIcon else destination.icon,
                 contentDescription = destination.label,
+                tint = labelColor,
                 modifier = Modifier.size(20.dp),
             )
             if (expanded) {
                 Spacer(Modifier.width(12.dp))
                 Text(
                     text = destination.label,
+                    color = labelColor,
                     fontSize = 13.sp,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,

@@ -10,9 +10,14 @@ package com.strata.tv.data.settings
  * [ProviderConfig.toPlayerApiUrl] resolve the runtime URLs.
  */
 data class ProviderConfig(
-    /** Built-in or "custom".  Empty/null means "not configured yet". */
+    /**
+     * Connection type id. Universal Xtream login uses `custom_xtream`
+     * (IPTV Smarters Pro "Xtreme Codes" equivalent). Empty = not set up.
+     */
     val providerId: String = "",
-    /** Xtream host (no trailing slash) e.g. "http://mybunny.tv". */
+    /** Optional display name for this playlist / connection. */
+    val connectionName: String = "",
+    /** Xtream host (scheme + host + optional port), no trailing slash. */
     val host: String = "",
     val username: String = "",
     val password: String = "",
@@ -25,15 +30,7 @@ data class ProviderConfig(
     /**
      * When true, pull the user's website-curated filtered playlist
      * from `{host}/client/download.php?u=…&p=…` instead of the full
-     * provider catalogue.  This is the "Personal Playlist" the user
-     * can build at https://mybunny.tv (and other Xtream UI-based
-     * providers); it returns a standard M3U so the regular parser
-     * pipeline handles it without the JSON fallback.
-     *
-     * Defaults to `false` — the wizard surfaces this as an opt-in
-     * with a warning that the user must have actually curated a list
-     * on the provider's website first, otherwise the playlist will
-     * come back empty.
+     * provider catalogue.
      */
     val useFilteredPlaylist: Boolean = false,
 ) {
@@ -44,21 +41,20 @@ data class ProviderConfig(
             else -> host.isNotBlank() && username.isNotBlank() && password.isNotBlank()
         }
 
+    private fun enc(value: String): String =
+        java.net.URLEncoder.encode(value, Charsets.UTF_8.name())
+
     /** Resolve the M3U playlist URL for [SyncService.syncFromUrl]. */
     fun toM3uUrl(): String = when {
         providerId == "custom_m3u" -> customM3uUrl
         useFilteredPlaylist -> {
-            // Website-curated personal playlist.  Returns a real M3U so
-            // the standard parser handles it; no JSON fallback needed.
             val base = host.trimEnd('/')
-            "$base/client/download.php?u=$username&p=$password"
+            "$base/client/download.php?u=${enc(username)}&p=${enc(password)}"
         }
         else -> {
-            // Don't pin output=ts.  Some providers (MyBunny.TV is one)
-            // return an empty body when this parameter is set.  The
-            // standard playlist URL is just type=m3u_plus.
+            // Standard Xtream get.php — same family of endpoints Smarters uses.
             val base = host.trimEnd('/')
-            "$base/get.php?username=$username&password=$password&type=m3u_plus"
+            "$base/get.php?username=${enc(username)}&password=${enc(password)}&type=m3u_plus"
         }
     }
 
@@ -75,7 +71,7 @@ data class ProviderConfig(
         "mybunny_tv" -> "https://mybunny.tv/epg.xml"
         else -> {
             val base = host.trimEnd('/')
-            "$base/xmltv.php?username=$username&password=$password"
+            "$base/xmltv.php?username=${enc(username)}&password=${enc(password)}"
         }
     }
 
@@ -83,33 +79,17 @@ data class ProviderConfig(
     fun toPlayerApiUrl(action: String? = null): String? {
         if (providerId == "custom_m3u") return null
         val base = host.trimEnd('/')
-        val core = "$base/player_api.php?username=$username&password=$password"
+        if (base.isBlank()) return null
+        val core = "$base/player_api.php?username=${enc(username)}&password=${enc(password)}"
         return if (action != null) "$core&action=$action" else core
     }
 
     /**
-     * User-Agent string to send on Xtream API calls (`player_api.php`,
-     * `get_series_info`, etc.).  Provider-specific because different
-     * panel software has different filters:
-     *
-     * - **MyBunny.TV** is happy with the VLC UA — it's a turbobunny-
-     *   panel install behind Cloudflare and that's a common UA.
-     * - **SkyGlass** is an XCIPTV-v911 rebrand whose underlying panel
-     *   rejects the VLC UA on the JSON API.  The XCIPTV-SkyGlass app
-     *   itself dispatches via Volley/HurlStack which sends Android's
-     *   default `okhttp/4.x`-equivalent UA, so we mirror that.
-     * - **Custom Xtream** defaults to `okhttp/4.12.0` (safer — only a
-     *   minority of panels filter okhttp).  User can change provider
-     *   to MyBunny preset if they want the VLC UA.
+     * User-Agent for Xtream API calls. VLC is widely accepted by panels
+     * that IPTV Smarters Pro also reaches; okhttp alone is rejected by
+     * some XCIPTV-style hosts.
      */
-    fun apiUserAgent(): String = when (providerId) {
-        // VLC is universally accepted: MyBunny.TV explicitly needs it,
-        // Me2u Ultra Sky's Ultra portal (lecyvision.com) hangs on
-        // okhttp/4.12.0 but serves 200 with VLC, and le.thund.re/all
-        // SkyGlass portals also accept it.
-        "mybunny_tv", "me2u" -> "VLC/3.0.20 LibVLC/3.0.20"
-        else -> "okhttp/4.12.0"
-    }
+    fun apiUserAgent(): String = "VLC/3.0.20 LibVLC/3.0.20"
 }
 
 /**

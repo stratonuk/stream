@@ -14,7 +14,10 @@ Legend: **Done** / **Partial** / **Not yet**
 | EPG now/next | Done | XMLTV where provider supplies it — never invented |
 | TMDB enrichment | Done | Requires optional API key; attribution in About |
 | My List | Partial | Watchlist + favourite channels wired; polish ongoing |
-| Local profiles | Partial | UI switcher present; full per-profile DB scoping hardening pending |
+| Local profiles | Partial | Active profile id persisted in DataStore; full per-profile DB scoping pending |
+| Safe in-place APK updates | Done | Permanent applicationId + release cert; Room destructive fallback removed |
+| Backup & restore | Done | Settings export/import of prefs, CW, favourites, history |
+| Encrypted credentials | Done | Xtream password in EncryptedSharedPreferences (Keystore) |
 | Category rename/reorder UI | Partial | Engine ready; settings UI subset |
 | Skip intro / recap | Partial | Only when accurate timestamps exist |
 | Physical Fire TV QA | Not yet | Emulator / host build verified; device pending user install |

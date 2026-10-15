@@ -1,7 +1,7 @@
 name: Release
 
-# Triggered by pushing a tag like `v0.3.0`.  Builds the release APK,
-# attaches it to a fresh GitHub Release with auto-generated notes.
+# Triggered by pushing a tag like `v1.0.1`. Builds the release APK with
+# the permanent STREAM signing certificate and attaches it for Downloader.
 on:
   push:
     tags:
@@ -9,15 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v0.3.0)'
+        description: 'Tag to release (e.g. v1.0.1)'
         required: true
         type: string
 
 permissions:
   contents: write
 
-# Only one release build per tag at a time.  If a new tag fires while
-# an older one is mid-build, cancel the older one.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -30,22 +28,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        # actions/checkout v4.2.2 — pinned to immutable SHA for supply-chain hygiene.
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          # Full history so generate_release_notes can diff against the previous tag.
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up JDK 17
-        # actions/setup-java v4.7.0
         uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b
         with:
           distribution: 'temurin'
           java-version: '17'
 
       - name: Set up Gradle
-        # gradle/actions/setup-gradle v4.2.2 — provides Gradle wrapper validation + caching.
         uses: gradle/actions/setup-gradle@0bdd871935719febd78681f197cd39af5b6e16a6
 
       - name: Make gradlew executable
@@ -58,63 +52,72 @@ jobs:
           VERSION="${TAG_REF#v}"
           echo "tag=${TAG_REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: ${TAG_REF}"
-          echo "Resolved version: ${VERSION}"
 
       - name: Decode release signing keystore
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          # Recreate app/release.jks from the base64-encoded secret so
-          # build.gradle.kts can pick it up via rootProject.file(...).
-          # Same key is used locally on the maintainer's machine, so
-          # CI-published APKs share a signature with locally-built ones
-          # and adb install -r works without an uninstall.
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "::error::RELEASE_KEYSTORE_BASE64 secret is required for in-place updates"
+            exit 1
+          fi
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > app/release.jks
           ls -la app/release.jks
 
       - name: Build release APK
         env:
-          # TMDB API key set as a repository secret.  build.gradle.kts
-          # reads this and injects it into BuildConfig.TMDB_API_KEY.
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          # Release signing — paired with the decode step above.
           RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+        run: |
+          if [ -z "$RELEASE_KEYSTORE_PASSWORD" ] || [ -z "$RELEASE_KEY_ALIAS" ] || [ -z "$RELEASE_KEY_PASSWORD" ]; then
+            echo "::error::Release signing secrets are incomplete — see RELEASE_SIGNING.md"
+            exit 1
+          fi
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK certificate fingerprint
+        run: |
+          EXPECTED="cbbf8d3b51a24f62039c1a29a8a6b272bcf93ece077e668f095f83a29b1e268b"
+          ACTUAL=$(apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk \
+            | awk -F': ' '/SHA-256 digest/{print tolower($2); exit}')
+          echo "Expected: $EXPECTED"
+          echo "Actual:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Signing certificate mismatch — refusing to publish (would break in-place updates)"
+            exit 1
+          fi
 
       - name: Rename APK with version + stable alias
         id: rename
-        # Ship two assets each release: a versioned one for archival
-        # (`strata-tv-0.3.15.apk`) and a stable-named alias
-        # (`strata-iptv.apk`) so
-        #   https://github.com/Yokomoko/Strata-IPTV/releases/latest/download/strata-iptv.apk
-        # always 302s to the current latest build.  The Downloader
-        # / Send-Files-To-TV-style sideloaders need a URL that doesn't
-        # change between versions to be useful.
         run: |
           SOURCE="app/build/outputs/apk/release/app-release.apk"
-          VERSIONED="app/build/outputs/apk/release/strata-tv-${{ steps.version.outputs.version }}.apk"
-          STABLE="app/build/outputs/apk/release/strata-iptv.apk"
-          if [ ! -f "$SOURCE" ]; then
-            echo "::error::Release APK not found at $SOURCE"
-            exit 1
-          fi
+          VERSIONED="app/build/outputs/apk/release/stream-${{ steps.version.outputs.version }}.apk"
+          STABLE="app/build/outputs/apk/release/stream.apk"
           cp "$SOURCE" "$VERSIONED"
           cp "$SOURCE" "$STABLE"
           echo "versioned_apk=${VERSIONED}" >> "$GITHUB_OUTPUT"
           echo "stable_apk=${STABLE}" >> "$GITHUB_OUTPUT"
-          ls -la "$VERSIONED" "$STABLE"
 
       - name: Create GitHub Release
-        # softprops/action-gh-release v2.2.1
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Strata TV ${{ steps.version.outputs.version }}
+          name: STREAM ${{ steps.version.outputs.version }}
           generate_release_notes: true
           files: |
             ${{ steps.rename.outputs.versioned_apk }}
             ${{ steps.rename.outputs.stable_apk }}
           fail_on_unmatched_files: true
+          body: |
+            ## Install / update with Downloader
+
+            ```
+            https://github.com/stratonuk/stream/releases/latest/download/stream.apk
+            ```
+
+            This release is signed with the **same permanent certificate** as previous STREAM builds.
+            Installing over an existing STREAM app keeps your login, favourites and continue watching.
+
+            See SAFE_UPDATES.md and RELEASE_SIGNING.md.

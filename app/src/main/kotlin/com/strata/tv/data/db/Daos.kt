@@ -141,6 +141,9 @@ interface ChannelDao {
     @Query("SELECT * FROM channels WHERE is_favourite = 1")
     fun watchFavourites(): Flow<List<ChannelEntity>>
 
+    @Query("SELECT content_id FROM channels WHERE is_favourite = 1")
+    suspend fun snapshotFavouriteIds(): List<String>
+
     @Query("UPDATE channels SET is_favourite = :fav WHERE content_id = :contentId")
     suspend fun setFavourite(contentId: String, fav: Boolean)
 
@@ -1000,6 +1003,12 @@ interface ContinueWatchingDao {
     @Query("SELECT * FROM continue_watching ORDER BY last_updated DESC LIMIT :limit")
     fun watchAll(limit: Int = 20): Flow<List<ContinueWatchingEntity>>
 
+    @Query("SELECT * FROM continue_watching ORDER BY last_updated DESC")
+    suspend fun snapshotAll(): List<ContinueWatchingEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entries: List<ContinueWatchingEntity>)
+
     /**
      * One-shot backfill of the `title` column for rows written before
      * v0.3.24 (when the column didn't exist).  Joins movies via
@@ -1075,6 +1084,12 @@ interface WatchHistoryDao {
 
     @Query("SELECT * FROM watch_history ORDER BY watched_at DESC LIMIT :limit")
     fun watchRecent(limit: Int = 50): Flow<List<WatchHistoryEntity>>
+
+    @Query("SELECT * FROM watch_history ORDER BY watched_at DESC LIMIT :limit")
+    suspend fun snapshotRecent(limit: Int = 500): List<WatchHistoryEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(entries: List<WatchHistoryEntity>)
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,6 +1105,12 @@ interface FavouriteDao {
 
     @Query("SELECT * FROM favourites")
     fun watchAll(): Flow<List<FavouriteEntity>>
+
+    @Query("SELECT * FROM favourites")
+    suspend fun snapshotAll(): List<FavouriteEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun addAll(entries: List<FavouriteEntity>)
 
     @Query("SELECT EXISTS(SELECT 1 FROM favourites WHERE content_id = :contentId)")
     fun watchIsFavourite(contentId: String): Flow<Boolean>
@@ -1108,6 +1129,12 @@ interface WatchlistDao {
 
     @Query("SELECT * FROM watchlist ORDER BY added_at DESC")
     fun watchAll(): Flow<List<WatchlistEntity>>
+
+    @Query("SELECT * FROM watchlist ORDER BY added_at DESC")
+    suspend fun snapshotAll(): List<WatchlistEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun addAll(entries: List<WatchlistEntity>)
 
     @Query("SELECT EXISTS(SELECT 1 FROM watchlist WHERE content_id = :contentId)")
     fun watchIsInWatchlist(contentId: String): Flow<Boolean>

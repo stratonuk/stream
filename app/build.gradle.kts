@@ -40,13 +40,17 @@ android {
         // refresh.  tv.strata.app gives the cleanest possible reset.
         // Kotlin namespace stays com.strata.tv so source code is
         // untouched.
+        // PERMANENT — never change. Changing applicationId breaks
+        // in-place Fire Stick updates via Downloader and wipes data.
         applicationId = "tv.stream.app"
         // Min SDK 21 covers every Fire Stick currently in service.
         // Fire Stick 4K Max is API 28 (Fire OS 7) or API 30 (Fire OS 8).
         minSdk = 21
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // Increment versionCode on EVERY release so Android accepts
+        // the update without uninstall. versionName is display-only.
+        versionCode = 2
+        versionName = "1.0.1"
 
         // Custom JUnit runner that swaps the Application class for
         // [HiltTestApplication] so @AndroidEntryPoint / @HiltViewModel
@@ -91,7 +95,7 @@ android {
                 rootProject.file("local.properties").takeIf { it.exists() }
                     ?.inputStream()?.use(props::load)
             }.getProperty("release.key.alias")
-            ?: "strata"
+            ?: "stream"
     val releaseKeyPassword: String? =
         System.getenv("RELEASE_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
             ?: Properties().also { props ->
@@ -121,14 +125,17 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Prefer the stable release keystore.  If neither env vars
-            // nor local.properties have been set up, fall through to
-            // the debug keystore so a fresh checkout still builds.
-            signingConfig = if (releaseSigningConfigured) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
+            // Release APKs MUST use the permanent STREAM certificate so
+            // Fire Stick Downloader updates install in-place. Falling
+            // back to the debug keystore would brick upgrades for users
+            // who already have a release-signed build installed.
+            check(releaseSigningConfigured) {
+                "Release signing is not configured. See RELEASE_SIGNING.md — " +
+                    "place app/release.jks and set release.keystore.password / " +
+                    "release.key.alias / release.key.password in local.properties " +
+                    "(or RELEASE_* env vars). Never ship a debug-signed release."
             }
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -211,6 +218,9 @@ dependencies {
 
     // Preferences DataStore — persistent app settings (provider config, etc).
     implementation(libs.datastore.preferences)
+
+    // EncryptedSharedPreferences for Xtream password (Android Keystore).
+    implementation(libs.security.crypto)
 
     // Unit tests — pure JVM, no Android runtime needed.  Domain
     // package + parsers must stay JVM-testable so we can run TDD

@@ -31,7 +31,10 @@ import androidx.room.TypeConverters
         WatchlistEntity::class,
     ],
     version = 12,
-    exportSchema = true,
+    // Schema JSON export disabled: parallel debug/release KSP can race on
+    // the same schema file and fail with "Empty schema file". Migrations
+    // remain hand-authored in Migrations.kt and registered in AppModule.
+    exportSchema = false,
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {

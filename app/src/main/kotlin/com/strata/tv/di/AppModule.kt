@@ -51,15 +51,14 @@ object AppModule {
         return Room.databaseBuilder(
             context = context,
             klass = AppDatabase::class.java,
+            // Stable on-disk name — renaming would orphan user libraries
+            // on update. Keep "strata-tv.db" for continuity with v1.0.0.
             name = "strata-tv.db",
         )
-            // Default WAL mode is fine — large EPG writes don't block
-            // concurrent reads from the home screen.
-            //
-            // Real migrations for every schema bump so user data —
-            // favourites, watchlist, continue-watching, last-watched
-            // channel — survives app updates.  Destructive fallback is
-            // a last-resort safety net, not the happy path.
+            // Real migrations ONLY. Never wipe user data on schema bump —
+            // Fire Stick Downloader updates must preserve login, favourites,
+            // continue watching and history. Missing migrations fail loudly
+            // so we fix them instead of silently destroying the library.
             .addMigrations(
                 MIGRATION_3_4,
                 MIGRATION_4_5,
@@ -71,7 +70,6 @@ object AppModule {
                 MIGRATION_10_11,
                 MIGRATION_11_12,
             )
-            .fallbackToDestructiveMigration()
             .build()
     }
 

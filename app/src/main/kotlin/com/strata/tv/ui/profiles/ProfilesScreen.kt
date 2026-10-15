@@ -15,15 +15,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Surface
@@ -31,15 +30,17 @@ import androidx.tv.material3.Text
 import com.strata.tv.ui.theme.StrataColors
 
 /**
- * Local-only profiles. Each profile keeps independent continue watching,
- * favourites and playback preferences (persisted via DataStore keys
- * scoped by profile id in a later hardening pass).
+ * Local-only profiles. Active profile id is persisted in DataStore and
+ * survives APK updates. Full per-profile library scoping can deepen later
+ * without changing the stored id format.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-fun ProfilesScreen() {
-    var active by remember { mutableStateOf("Profile 1") }
-    val profiles = listOf("Profile 1", "Profile 2")
+fun ProfilesScreen(
+    viewModel: ProfilesViewModel = hiltViewModel(),
+) {
+    val active by viewModel.activeProfileId.collectAsStateWithLifecycle()
+    val profiles = listOf("profile_1" to "Profile 1", "profile_2" to "Profile 2")
 
     Column(
         modifier = Modifier
@@ -61,10 +62,10 @@ fun ProfilesScreen() {
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-            profiles.forEach { name ->
-                val selected = name == active
+            profiles.forEach { (id, name) ->
+                val selected = id == active
                 Surface(
-                    onClick = { active = name },
+                    onClick = { viewModel.selectProfile(id) },
                     shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(16.dp)),
                     colors = ClickableSurfaceDefaults.colors(
                         containerColor = StrataColors.SurfaceRaised,

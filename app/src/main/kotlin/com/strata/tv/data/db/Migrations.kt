@@ -6,11 +6,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 /**
  * Room migrations.
  *
- * We keep these alongside a `fallbackToDestructiveMigration()` safety net
- * on the database builder so a genuinely broken migration doesn't brick
- * the app, but the happy path should always run through a real migration
- * so user data (favourites, watchlist, continue-watching, last-watched
- * channel) is preserved across app updates.
+ * CRITICAL: STREAM never uses `fallbackToDestructiveMigration()`.
+ * Every schema bump MUST ship a real [Migration] so Fire Stick
+ * in-place APK updates preserve favourites, watchlist, continue-
+ * watching, last-watched channel and the full catalogue cache.
+ *
+ * When bumping [AppDatabase] version:
+ * 1. Add `MIGRATION_N_N+1` here.
+ * 2. Register it in [com.strata.tv.di.AppModule].
+ * 3. Export / commit the Room schema JSON under `app/schemas/`.
  */
 
 /**
