@@ -1,5 +1,6 @@
 package com.strata.tv.ui.search
 
+import android.view.KeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -14,34 +15,37 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import android.view.KeyEvent
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.LiveTv
+import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.layout.ContentScale
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import androidx.compose.ui.platform.LocalContext
-import com.strata.tv.ui.widgets.CardContextMenu
-import com.strata.tv.ui.widgets.ContextMenuAction
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -49,14 +53,10 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.LiveTv
-import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.tv.foundation.lazy.list.TvLazyColumn
 import androidx.tv.foundation.lazy.list.TvLazyRow
 import androidx.tv.foundation.lazy.list.items
+import androidx.tv.foundation.lazy.list.itemsIndexed
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
@@ -64,16 +64,20 @@ import androidx.tv.material3.ListItem
 import androidx.tv.material3.ListItemDefaults
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import com.strata.tv.ui.nav.AppNavState
 import com.strata.tv.ui.nav.PlayerArgs
 import com.strata.tv.ui.theme.StrataColors
+import com.strata.tv.ui.widgets.CardContextMenu
+import com.strata.tv.ui.widgets.ContextMenuAction
 
 /**
  * Search screen -- polished search field, quick-access genre chips
  * as empty state, grouped results with type badges.
  *
- * Phase 9: upgraded typography, empty state with genre suggestions,
- * better visual hierarchy.
+ * D-pad Down from the search field moves focus into the scrollable
+ * results list (BasicTextField otherwise traps vertical navigation).
  */
 @OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
@@ -86,13 +90,9 @@ fun SearchScreen(
     val uiState by viewModel.results.collectAsState()
     val watchlistIds by viewModel.watchlistIds.collectAsState()
 
-    // Long-press / Menu-button context menu, shared across all result rows.
     var contextMenuActions by remember { mutableStateOf<List<ContextMenuAction>>(emptyList()) }
-
-    // Keyboard is dismissed when the user navigates Down from the
-    // search field into the results — NOT on result arrival, which
-    // was stealing focus mid-typing.
     val keyboardController = LocalSoftwareKeyboardController.current
+    val resultsFocusRequester = remember { FocusRequester() }
 
     Column(
         modifier = modifier
@@ -100,7 +100,6 @@ fun SearchScreen(
             .background(StrataColors.SurfaceVoid)
             .padding(horizontal = 32.dp, vertical = 24.dp),
     ) {
-        // Title
         Text(
             text = "Search",
             color = StrataColors.TextPrimary,
@@ -110,32 +109,50 @@ fun SearchScreen(
         )
         Spacer(Modifier.height(16.dp))
 
-        // Search field
         SearchField(
             value = query,
             onValueChange = { viewModel.onQueryChanged(it) },
             onImeSearch = { keyboardController?.hide() },
+            onMoveDown = {
+                keyboardController?.hide()
+                runCatching { resultsFocusRequester.requestFocus() }
+            },
         )
         Spacer(Modifier.height(16.dp))
 
-        // Results / empty state
+        // weight(1f) gives the results a bounded height so TvLazyColumn
+        // can scroll with the remote — without it the list expands to
+        // full content height and Down has nowhere to scroll.
         when (val state = uiState) {
             SearchUiState.Empty -> {
                 SearchEmptyState(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                     message = "Search channels, movies, and shows",
                     onQuickSearch = { viewModel.onQueryChanged(it) },
+                    firstFocusRequester = resultsFocusRequester,
                 )
             }
             SearchUiState.NoResults -> {
-                NoResultsState(query)
+                NoResultsState(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    query = query,
+                )
             }
             is SearchUiState.Results -> {
                 ResultsList(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                     state = state,
                     onNavigate = onNavigate,
                     watchlistIds = watchlistIds,
                     viewModel = viewModel,
                     onMenuShow = { contextMenuActions = it },
+                    firstFocusRequester = resultsFocusRequester,
                 )
             }
         }
@@ -152,12 +169,13 @@ fun SearchScreen(
 // Search field
 // =====================================================================
 
-@OptIn(ExperimentalTvMaterial3Api::class)
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 private fun SearchField(
     value: String,
     onValueChange: (String) -> Unit,
     onImeSearch: () -> Unit = {},
+    onMoveDown: () -> Unit = {},
 ) {
     var focused by remember { mutableStateOf(false) }
     val borderColor = if (focused) StrataColors.AccentPrimary else StrataColors.SurfaceOverlay
@@ -208,7 +226,32 @@ private fun SearchField(
         },
         modifier = Modifier
             .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused },
+            .onFocusChanged { focused = it.isFocused }
+            .focusProperties {
+                // Prefer our explicit hand-off to the results list.
+                down = FocusRequester.Cancel
+            }
+            .onPreviewKeyEvent { event ->
+                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) {
+                    return@onPreviewKeyEvent false
+                }
+                when (event.nativeKeyEvent.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN,
+                    KeyEvent.KEYCODE_CHANNEL_DOWN,
+                    -> {
+                        onMoveDown()
+                        true
+                    }
+                    KeyEvent.KEYCODE_ENTER,
+                    KeyEvent.KEYCODE_DPAD_CENTER,
+                    KeyEvent.KEYCODE_NUMPAD_ENTER,
+                    -> {
+                        onImeSearch()
+                        false
+                    }
+                    else -> false
+                }
+            },
     )
 }
 
@@ -219,14 +262,19 @@ private fun SearchField(
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun SearchEmptyState(
+    modifier: Modifier = Modifier,
     message: String,
     onQuickSearch: (String) -> Unit,
+    firstFocusRequester: FocusRequester,
 ) {
+    val scroll = rememberScrollState()
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier
+            .verticalScroll(scroll)
+            .padding(bottom = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(60.dp))
+        Spacer(Modifier.height(40.dp))
 
         Icon(
             imageVector = Icons.Outlined.Search,
@@ -242,7 +290,6 @@ private fun SearchEmptyState(
         )
         Spacer(Modifier.height(24.dp))
 
-        // Quick-search genre chips
         Text(
             text = "QUICK SEARCH",
             color = StrataColors.TextTertiary,
@@ -252,12 +299,15 @@ private fun SearchEmptyState(
         )
         Spacer(Modifier.height(12.dp))
 
-        val quickSearches = listOf("Action", "Comedy", "Drama", "Horror", "Sci-Fi", "Documentary", "Kids", "News")
+        val quickSearches = listOf(
+            "Action", "Comedy", "Drama", "Horror", "Sci-Fi", "Documentary", "Kids", "News",
+        )
         TvLazyRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(horizontal = 16.dp),
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            items(items = quickSearches, key = { it }) { genre ->
+            itemsIndexed(items = quickSearches, key = { _, g -> g }) { index, genre ->
                 Surface(
                     onClick = { onQuickSearch(genre) },
                     shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(20.dp)),
@@ -267,7 +317,11 @@ private fun SearchEmptyState(
                     ),
                     modifier = Modifier
                         .height(36.dp)
-                        .border(1.dp, StrataColors.SurfaceFloat, RoundedCornerShape(20.dp)),
+                        .border(1.dp, StrataColors.SurfaceFloat, RoundedCornerShape(20.dp))
+                        .then(
+                            if (index == 0) Modifier.focusRequester(firstFocusRequester)
+                            else Modifier,
+                        ),
                 ) {
                     Text(
                         text = genre,
@@ -283,9 +337,12 @@ private fun SearchEmptyState(
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun NoResultsState(query: String) {
+private fun NoResultsState(
+    modifier: Modifier = Modifier,
+    query: String,
+) {
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier,
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -312,102 +369,118 @@ private fun NoResultsState(query: String) {
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun ResultsList(
+    modifier: Modifier = Modifier,
     state: SearchUiState.Results,
     onNavigate: AppNavState?,
     watchlistIds: Set<String>,
     viewModel: SearchViewModel,
     onMenuShow: (List<ContextMenuAction>) -> Unit,
+    firstFocusRequester: FocusRequester,
 ) {
+    // Flatten into one focus order so Down walks Movies → Shows → Channels.
+    data class Row(
+        val key: String,
+        val kind: String, // header | movie | show | channel
+        val header: String? = null,
+        val result: SearchResult? = null,
+    )
+
+    val rows = remember(state) {
+        buildList {
+            if (state.movies.isNotEmpty()) {
+                add(Row("h-mv", "header", header = "Movies (${state.movies.size})"))
+                state.movies.take(MOVIE_CAP).forEach {
+                    add(Row("mv:${it.contentId}", "movie", result = it))
+                }
+            }
+            if (state.shows.isNotEmpty()) {
+                add(Row("h-sh", "header", header = "Shows (${state.shows.size})"))
+                state.shows.take(SHOW_CAP).forEach {
+                    add(Row("sh:${it.contentId}", "show", result = it))
+                }
+            }
+            if (state.channels.isNotEmpty()) {
+                add(Row("h-ch", "header", header = "Channels (${state.channels.size})"))
+                state.channels.take(CHANNEL_CAP).forEach {
+                    add(Row("ch:${it.contentId}", "channel", result = it))
+                }
+            }
+        }
+    }
+
+    val firstResultIndex = rows.indexOfFirst { it.result != null }
+
     TvLazyColumn(
-        contentPadding = PaddingValues(bottom = 24.dp),
+        modifier = modifier,
+        contentPadding = PaddingValues(bottom = 48.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
+        userScrollEnabled = true,
     ) {
-        // Movies first — these are what most users are searching for.
-        if (state.movies.isNotEmpty()) {
-            item { SectionHeader("Movies (${state.movies.size})") }
-            items(
-                items = state.movies.take(MOVIE_CAP),
-                key = { "mv:${it.contentId}" },
-            ) { result ->
-                ResultRow(
-                    result = result,
-                    icon = Icons.Outlined.Movie,
-                    iconColor = StrataColors.AccentPrimary,
-                    typeLabel = "MOVIE",
-                    inWatchlist = result.contentId in watchlistIds,
-                    onClick = {
-                        onNavigate?.openMovieDetail(result.contentId)
-                    },
-                    onMenuShow = onMenuShow,
-                    viewModel = viewModel,
-                )
-            }
-        }
-
-        // Shows second.
-        if (state.shows.isNotEmpty()) {
-            item { SectionHeader("Shows (${state.shows.size})") }
-            items(
-                items = state.shows.take(SHOW_CAP),
-                key = { "sh:${it.contentId}" },
-            ) { result ->
-                ResultRow(
-                    result = result,
-                    icon = Icons.Outlined.VideoLibrary,
-                    iconColor = StrataColors.AccentSecondary,
-                    typeLabel = "SHOW",
-                    // Shows are keyed by series title in the watchlist.
-                    inWatchlist = result.seriesTitle in watchlistIds,
-                    onClick = {
-                        if (result.seriesTitle.isNotBlank()) {
-                            onNavigate?.openShowDetail(result.seriesTitle)
-                        }
-                    },
-                    onMenuShow = onMenuShow,
-                    viewModel = viewModel,
-                )
-            }
-        }
-
-        // Channels last.  Bumped from 5 to 15 — issue #36 noted the
-        // previous cap was too aggressive for users searching for a
-        // channel that wasn't quite scoring top of the list.
-        if (state.channels.isNotEmpty()) {
-            item { SectionHeader("Channels (${state.channels.size})") }
-            items(
-                items = state.channels.take(CHANNEL_CAP),
-                key = { "ch:${it.contentId}" },
-            ) { result ->
-                ResultRow(
-                    result = result,
-                    icon = Icons.Outlined.LiveTv,
-                    iconColor = StrataColors.StatusLive,
-                    typeLabel = "LIVE",
-                    inWatchlist = false, // channels don't go on the watchlist
-                    onClick = {
-                        onNavigate?.openPlayer(
-                            PlayerArgs(
-                                streamUrl = result.streamUrl,
-                                title = result.title,
-                                isLive = true,
-                                contentType = "live",
-                                artworkUrl = result.artworkUrl,
-                                contentId = result.contentId,
-                            ),
+        itemsIndexed(
+            items = rows,
+            key = { _, row -> row.key },
+        ) { index, row ->
+            when (row.kind) {
+                "header" -> SectionHeader(row.header.orEmpty())
+                else -> {
+                    val result = row.result ?: return@itemsIndexed
+                    val isFirst = index == firstResultIndex
+                    when (row.kind) {
+                        "movie" -> ResultRow(
+                            result = result,
+                            icon = Icons.Outlined.Movie,
+                            iconColor = StrataColors.AccentPrimary,
+                            typeLabel = "MOVIE",
+                            inWatchlist = result.contentId in watchlistIds,
+                            onClick = { onNavigate?.openMovieDetail(result.contentId) },
+                            onMenuShow = onMenuShow,
+                            viewModel = viewModel,
+                            focusRequester = if (isFirst) firstFocusRequester else null,
                         )
-                    },
-                    onMenuShow = onMenuShow,
-                    viewModel = viewModel,
-                )
+                        "show" -> ResultRow(
+                            result = result,
+                            icon = Icons.Outlined.VideoLibrary,
+                            iconColor = StrataColors.AccentSecondary,
+                            typeLabel = "SHOW",
+                            inWatchlist = result.seriesTitle in watchlistIds,
+                            onClick = {
+                                if (result.seriesTitle.isNotBlank()) {
+                                    onNavigate?.openShowDetail(result.seriesTitle)
+                                }
+                            },
+                            onMenuShow = onMenuShow,
+                            viewModel = viewModel,
+                            focusRequester = if (isFirst) firstFocusRequester else null,
+                        )
+                        "channel" -> ResultRow(
+                            result = result,
+                            icon = Icons.Outlined.LiveTv,
+                            iconColor = StrataColors.StatusLive,
+                            typeLabel = "LIVE",
+                            inWatchlist = false,
+                            onClick = {
+                                onNavigate?.openPlayer(
+                                    PlayerArgs(
+                                        streamUrl = result.streamUrl,
+                                        title = result.title,
+                                        isLive = true,
+                                        contentType = "live",
+                                        artworkUrl = result.artworkUrl,
+                                        contentId = result.contentId,
+                                    ),
+                                )
+                            },
+                            onMenuShow = onMenuShow,
+                            viewModel = viewModel,
+                            focusRequester = if (isFirst) firstFocusRequester else null,
+                        )
+                    }
+                }
             }
         }
     }
 }
 
-// Cap how many rows we render per section.  Bumped from the original
-// 30 / 30 / 5 because the dedup pass we added in [SearchViewModel]
-// collapses quality variants — what used to be 30 entries is now
-// closer to 20 unique titles, so we have headroom to surface more.
 private const val MOVIE_CAP = 60
 private const val SHOW_CAP = 60
 private const val CHANNEL_CAP = 15
@@ -424,7 +497,9 @@ private fun SectionHeader(title: String) {
         color = StrataColors.TextSecondary,
         fontSize = 16.sp,
         fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 16.dp, bottom = 8.dp),
     )
 }
 
@@ -443,31 +518,36 @@ private fun ResultRow(
     onClick: () -> Unit,
     onMenuShow: (List<ContextMenuAction>) -> Unit,
     viewModel: SearchViewModel,
+    focusRequester: FocusRequester? = null,
 ) {
-    // Use the clean title; fall back to raw displayName only when title is blank.
     val displayText = result.title.ifBlank { result.displayName }
     val context = LocalContext.current
 
     Box(
-        modifier = Modifier.onPreviewKeyEvent { event ->
-            // Channels don't have a watchlist concept — no menu for them.
-            if (result.contentType == "live") return@onPreviewKeyEvent false
-            if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
-            if (event.nativeKeyEvent.keyCode != KeyEvent.KEYCODE_MENU) return@onPreviewKeyEvent false
+        modifier = Modifier
+            .fillMaxWidth()
+            .onPreviewKeyEvent { event ->
+                if (result.contentType == "live") return@onPreviewKeyEvent false
+                if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) {
+                    return@onPreviewKeyEvent false
+                }
+                if (event.nativeKeyEvent.keyCode != KeyEvent.KEYCODE_MENU) {
+                    return@onPreviewKeyEvent false
+                }
 
-            val actions = mutableListOf<ContextMenuAction>()
-            if (inWatchlist) {
-                actions += ContextMenuAction("Remove from Watchlist") {
-                    viewModel.removeFromWatchlist(result)
+                val actions = mutableListOf<ContextMenuAction>()
+                if (inWatchlist) {
+                    actions += ContextMenuAction("Remove from Watchlist") {
+                        viewModel.removeFromWatchlist(result)
+                    }
+                } else {
+                    actions += ContextMenuAction("Add to Watchlist") {
+                        viewModel.addToWatchlist(result)
+                    }
                 }
-            } else {
-                actions += ContextMenuAction("Add to Watchlist") {
-                    viewModel.addToWatchlist(result)
-                }
-            }
-            onMenuShow(actions)
-            true
-        },
+                onMenuShow(actions)
+                true
+            },
     ) {
         ListItem(
             selected = false,
@@ -480,6 +560,12 @@ private fun ResultRow(
                 selectedContainerColor = StrataColors.SurfaceFloat,
                 selectedContentColor = StrataColors.TextPrimary,
             ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (focusRequester != null) Modifier.focusRequester(focusRequester)
+                    else Modifier,
+                ),
             headlineContent = {
                 Text(
                     text = displayText,
@@ -498,12 +584,10 @@ private fun ResultRow(
                         maxLines = 1,
                     )
                 }
-            } else null,
+            } else {
+                null
+            },
             leadingContent = {
-                // Poster thumbnail when we have one (movies / shows
-                // after TMDB enrichment), falling back to the type
-                // icon otherwise (channels, or pre-enrichment).  48x72
-                // is roughly 2:3 — same aspect as a movie poster.
                 if (result.posterUrl.isNotBlank()) {
                     AsyncImage(
                         model = ImageRequest.Builder(context)

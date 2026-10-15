@@ -180,15 +180,8 @@ interface MovieDao {
     suspend fun byContentId(contentId: String): MovieEntity?
 
     /**
-     * Lightweight projection for grid/rail list views.  Omits heavy text
-     * columns (overview, cast) that cause CursorWindow overflow when the
-     * library has 2000+ movies.
-     */
-    /**
-     * Lightweight projection for grid/rail list views.  Omits heavy text
-     * columns (overview, cast) that cause CursorWindow overflow.
-     * Cap matches large Xtream VOD catalogues (~300k). Room may still
-     * chunk large cursors; keep the projection lean for that reason.
+     * Legacy flat list — prefer [movieCategories] + [byGroupTitlePaged]
+     * so the UI never materialises the whole VOD catalogue at once.
      */
     @Query(
         """
@@ -198,10 +191,79 @@ interface MovieDao {
         FROM movies WHERE hidden = 0
           AND (year IS NULL OR year BETWEEN 1900 AND 2030)
         ORDER BY year DESC
-        LIMIT 300000
+        LIMIT :limit
         """,
     )
-    fun watchAllForList(): Flow<List<MovieListItem>>
+    fun watchAllForList(limit: Int = 5000): Flow<List<MovieListItem>>
+
+    /**
+     * Provider categories (Xtream `group-title`) with visible movie counts.
+     * Full catalogue is browsed per category, not as one giant list.
+     */
+    @Query(
+        """
+        SELECT c.group_title AS groupTitle, COUNT(*) AS count
+        FROM content_items c
+        INNER JOIN movies m ON m.content_id = c.content_id
+        WHERE m.hidden = 0 AND c.group_title != ''
+          AND (m.year IS NULL OR m.year BETWEEN 1900 AND 2030)
+        GROUP BY c.group_title
+        ORDER BY count DESC
+        """,
+    )
+    suspend fun movieCategories(): List<CatalogueCategory>
+
+    /**
+     * Page of movies in one provider category.  Includes titles without
+     * posters so the full catalogue is reachable before TMDB enrichment.
+     * Falls back to `content_items.tvg_logo` when `movies.poster_url`
+     * is still empty (common before TMDB / after older syncs).
+     */
+    @Query(
+        """
+        SELECT m.id, m.content_id, m.movie_title, m.year, m.runtime, m.genre,
+               CASE WHEN m.poster_url != '' THEN m.poster_url ELSE COALESCE(c.tvg_logo, '') END
+                   AS poster_url,
+               m.resume_position_ms, m.watched, m.is_favourite,
+               m.language, m.rating, m.provider, m.tmdb_id, m.hidden
+        FROM movies m
+        INNER JOIN content_items c ON c.content_id = m.content_id
+        WHERE m.hidden = 0 AND c.group_title = :groupTitle
+          AND (m.year IS NULL OR m.year BETWEEN 1900 AND 2030)
+        ORDER BY CASE
+                   WHEN m.poster_url != '' OR c.tvg_logo != '' THEN 0
+                   ELSE 1
+                 END,
+                 m.rating DESC, m.year DESC
+        LIMIT :limit OFFSET :offset
+        """,
+    )
+    suspend fun byGroupTitlePaged(
+        groupTitle: String,
+        limit: Int,
+        offset: Int,
+    ): List<MovieListItem>
+
+    /**
+     * Copy provider logos from content_items into movies that still have
+     * an empty poster — so category rails show art without waiting for TMDB.
+     */
+    @Query(
+        """
+        UPDATE movies
+        SET poster_url = (
+            SELECT c.tvg_logo FROM content_items c
+            WHERE c.content_id = movies.content_id AND c.tvg_logo != ''
+            LIMIT 1
+        )
+        WHERE poster_url = ''
+          AND EXISTS (
+            SELECT 1 FROM content_items c
+            WHERE c.content_id = movies.content_id AND c.tvg_logo != ''
+          )
+        """,
+    )
+    suspend fun backfillPostersFromTvgLogo(): Int
 
     /** Recent movies for the Home screen rails (shows initials fallback when no poster). */
     @Query(
@@ -534,6 +596,44 @@ interface SeriesDao {
 
     @Query("SELECT * FROM series WHERE hidden = 0")
     fun watchAll(): Flow<List<SeriesEntity>>
+
+    /** Provider categories with visible series counts. */
+    @Query(
+        """
+        SELECT CASE WHEN group_title = '' THEN 'Uncategorised' ELSE group_title END AS groupTitle,
+               COUNT(*) AS count
+        FROM series
+        WHERE hidden = 0
+        GROUP BY CASE WHEN group_title = '' THEN 'Uncategorised' ELSE group_title END
+        ORDER BY count DESC
+        """,
+    )
+    suspend fun seriesCategories(): List<CatalogueCategory>
+
+    /**
+     * Page of series in one provider category.  Pass the sentinel
+     * `Uncategorised` to match blank `group_title` rows.
+     */
+    @Query(
+        """
+        SELECT id, series_title, poster_url, backdrop_url, genre, language,
+               total_seasons, total_episodes, last_seen_total_episodes, hidden
+        FROM series
+        WHERE hidden = 0
+          AND (
+            (:groupTitle = 'Uncategorised' AND group_title = '')
+            OR group_title = :groupTitle
+          )
+        ORDER BY CASE WHEN poster_url = '' THEN 1 ELSE 0 END,
+                 total_episodes DESC, series_title COLLATE NOCASE
+        LIMIT :limit OFFSET :offset
+        """,
+    )
+    suspend fun byGroupTitlePaged(
+        groupTitle: String,
+        limit: Int,
+        offset: Int,
+    ): List<SeriesListItem>
 
     /**
      * Substring search over visible series titles.  Search only ever
@@ -1059,11 +1159,19 @@ interface ContinueWatchingDao {
         SELECT * FROM continue_watching
         WHERE id IN (
             SELECT MAX(id) FROM continue_watching
-            WHERE content_type != 'show' OR series_title IS NULL
+            WHERE (content_type != 'show' OR series_title IS NULL)
+              AND (
+                total_duration_ms <= 0
+                OR (total_duration_ms - resume_position_ms) > 180000
+              )
             GROUP BY content_id
             UNION ALL
             SELECT MAX(id) FROM continue_watching
             WHERE content_type = 'show' AND series_title IS NOT NULL
+              AND (
+                total_duration_ms <= 0
+                OR (total_duration_ms - resume_position_ms) > 180000
+              )
             GROUP BY series_title
         )
         ORDER BY last_updated DESC LIMIT :limit
@@ -1073,6 +1181,22 @@ interface ContinueWatchingDao {
 
     @Query("DELETE FROM continue_watching WHERE content_id = :contentId")
     suspend fun delete(contentId: String)
+
+    @Query("DELETE FROM continue_watching")
+    suspend fun clearAll()
+
+    /**
+     * Drop finished titles (≤3 minutes remaining). Keeps the Home rail
+     * free of movies/shows the user already completed.
+     */
+    @Query(
+        """
+        DELETE FROM continue_watching
+        WHERE total_duration_ms > 0
+          AND (total_duration_ms - resume_position_ms) <= 180000
+        """,
+    )
+    suspend fun deleteFinished(): Int
 
     /** Most recent CW entry for a series — used by the show detail screen. */
     @Query(

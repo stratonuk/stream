@@ -252,6 +252,10 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { cwDao.backfillEmptyTitles() }
                 .onFailure { Log.w(TAG, "CW title backfill failed", it) }
+            // Drop movies/shows already finished (≤3 min remaining) so
+            // they don't linger on the Continue Watching rail.
+            runCatching { cwDao.deleteFinished() }
+                .onFailure { Log.w(TAG, "CW finished prune failed", it) }
 
             // Dedup any leftover duplicate episodes from pre-v0.3.28
             // lazy-loads that inserted every quality variant for a

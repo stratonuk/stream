@@ -120,303 +120,89 @@ class SyncService @Inject constructor(
     }
 
     /**
-     * Fetch [playlistUrl], parse, classify, dedup and write to Room.
+     * Fetch catalogue and write to Room.
      *
-     * The whole pipeline runs on the calling coroutine — call this
-     * from a `Dispatchers.IO` worker (e.g. [androidx.work.WorkManager])
-     * so the main thread isn't blocked.  The function is suspending
-     * and respects coroutine cancellation: cancelling it mid-parse is
-     * safe because each Room upsert is its own transaction.
+     * [scope] lets the user sync Live / Movies / Shows separately so a
+     * huge VOD JSON payload cannot OOM the Fire Stick mid-parse.
+     * [SyncScope.All] runs the three Xtream slices **one after another**
+     * (persist + free memory between each) instead of loading everything
+     * at once.
      */
-    suspend fun syncFromUrl(playlistUrl: String, sourceId: Int) {
+    suspend fun syncFromUrl(
+        playlistUrl: String,
+        sourceId: Int,
+        scope: SyncScope = SyncScope.All,
+    ) {
         try {
             _progress.value = Progress.Downloading(0)
-
-            // Region / language / adult filters are presentation-only.
-            // Sync always stores the complete catalogue so toggling
-            // Settings never requires a re-download to recover EN| packs.
             val settings = settingsRepo.current()
             val provider = settings.provider
-            val live = mutableListOf<M3uEntry>()
-            val movies = mutableListOf<M3uEntry>()
-            val episodes = mutableListOf<M3uEntry>()
-            var seriesMetaToPersist: List<com.strata.tv.data.xtream.XtreamSeriesMeta> = emptyList()
-            var syncPath = "m3u"
-            var diagLiveCats = 0
-            var diagVodCats = 0
-            var diagSeriesCats = 0
-            var diagLiveProvider = 0
-            var diagMoviesProvider = 0
-            var diagSeriesProvider = 0
-            var m3uParsedTotal = 0
-
             val isXtream = provider.providerId != "custom_m3u" &&
                 provider.host.isNotBlank() &&
                 provider.username.isNotBlank() &&
                 provider.password.isNotBlank()
 
-            // Prefer player_api.php catalogue (same as IPTV Smarters Pro).
-            // M3U is fallback for raw playlists or when JSON endpoints fail.
-            var usedJson = false
+            var totalParsed = 0
+            var syncPath = "m3u"
+            var diag = SyncDiagnostics.Empty
+
             if (isXtream) {
-                try {
-                    android.util.Log.i("SyncService", "Xtream sync via player_api (JSON)")
-                    val snapshot: XtreamSnapshot = xtreamJson.fetchAll(
-                        host = provider.host,
-                        user = provider.username,
-                        pass = provider.password,
-                        userAgent = provider.apiUserAgent(),
-                        onProgress = { status ->
-                            _progress.value = Progress.Parsing(
-                                parsed = live.size + movies.size + episodes.size +
-                                    seriesMetaToPersist.size,
-                                skipped = 0,
-                            )
-                            progressTracker.setLabel(status)
-                        },
-                    )
-                    live.addAll(snapshot.live)
-                    movies.addAll(snapshot.movies)
-                    seriesMetaToPersist = snapshot.seriesMeta
-                    diagLiveCats = snapshot.liveCategories
-                    diagVodCats = snapshot.vodCategories
-                    diagSeriesCats = snapshot.seriesCategories
-                    diagLiveProvider = snapshot.liveProviderCount
-                    diagMoviesProvider = snapshot.moviesProviderCount
-                    diagSeriesProvider = snapshot.seriesProviderCount
-                    syncPath = "xtream_json"
-                    usedJson = true
-                    progressTracker.syncComplete(
-                        live.size + movies.size + seriesMetaToPersist.size,
-                    )
-                    android.util.Log.i(
-                        "SyncService",
-                        "JSON catalogue parsed: live=${live.size} movies=${movies.size} " +
-                            "series=${seriesMetaToPersist.size} " +
-                            "cats=${diagLiveCats + diagVodCats + diagSeriesCats}",
-                    )
-                } catch (e: Throwable) {
-                    android.util.Log.w(
-                        "SyncService",
-                        "Xtream JSON sync failed, falling back to M3U: ${e.message}",
-                    )
-                    live.clear()
-                    movies.clear()
-                    seriesMetaToPersist = emptyList()
+                val slices: List<SyncScope> = when (scope) {
+                    SyncScope.All -> listOf(SyncScope.Live, SyncScope.Movies, SyncScope.Shows)
+                    else -> listOf(scope)
                 }
-            }
-
-            if (!usedJson) {
-                syncPath = "m3u"
-                withContext(Dispatchers.IO) {
-                    fetchPlaylistWithRetry(playlistUrl, provider.apiUserAgent())
-                        .use { response ->
-                            if (!response.isSuccessful) {
-                                error("HTTP ${response.code} fetching playlist")
-                            }
-                            val body = response.body ?: error("Empty playlist body")
-                            val contentType = response.header("Content-Type").orEmpty()
-                            val source = body.source()
-                            source.request(512)
-                            val peek = source.peek().readUtf8(
-                                minOf(512L, source.buffer.size),
-                            ).trimStart()
-                            val isJsonResponse = contentType.contains("json", ignoreCase = true) ||
-                                peek.startsWith("{") || peek.startsWith("[")
-
-                            if (isJsonResponse) {
-                                if (!isXtream) {
-                                    error("Playlist URL returned JSON but Xtream credentials are missing")
-                                }
-                                // get.php returned JSON auth blob — use player_api.
-                                val snapshot: XtreamSnapshot = xtreamJson.fetchAll(
-                                    host = provider.host,
-                                    user = provider.username,
-                                    pass = provider.password,
-                                    userAgent = provider.apiUserAgent(),
-                                    onProgress = { status ->
-                                        _progress.value = Progress.Parsing(0, 0)
-                                        progressTracker.setLabel(status)
-                                    },
-                                )
-                                live.addAll(snapshot.live)
-                                movies.addAll(snapshot.movies)
-                                seriesMetaToPersist = snapshot.seriesMeta
-                                diagLiveCats = snapshot.liveCategories
-                                diagVodCats = snapshot.vodCategories
-                                diagSeriesCats = snapshot.seriesCategories
-                                diagLiveProvider = snapshot.liveProviderCount
-                                diagMoviesProvider = snapshot.moviesProviderCount
-                                diagSeriesProvider = snapshot.seriesProviderCount
-                                syncPath = "xtream_json_after_m3u_probe"
-                                progressTracker.syncComplete(
-                                    live.size + movies.size + seriesMetaToPersist.size,
-                                )
-                                return@use
-                            }
-
-                            body.charStream().buffered().useLines { lines ->
-                                coroutineScope {
-                                    val persistChannel = kotlinx.coroutines.channels
-                                        .Channel<PersistJob>(capacity = 2)
-                                    val persistJob = launch(Dispatchers.IO) {
-                                        for (job in persistChannel) {
-                                            when (job) {
-                                                is PersistJob.Movies -> persistMovies(
-                                                    job.entries, sourceId, playlistUrl,
-                                                )
-                                                is PersistJob.Shows -> persistShows(
-                                                    job.entries, sourceId, playlistUrl,
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    val moviesBuf = ArrayList<M3uEntry>(MOVIES_FLUSH_THRESHOLD)
-                                    val episodesBuf = ArrayList<M3uEntry>(EPISODES_FLUSH_THRESHOLD)
-                                    try {
-                                        parser.parseLines(lines).collect { result ->
-                                            when (result) {
-                                                is ParseResult.Batch -> {
-                                                    // Store everything — no region/language drop here.
-                                                    for (entry in result.entries) {
-                                                        when (entry.contentType) {
-                                                            ContentType.Live -> live.add(entry)
-                                                            ContentType.Movie -> {
-                                                                moviesBuf.add(entry)
-                                                                if (moviesBuf.size >= MOVIES_FLUSH_THRESHOLD) {
-                                                                    persistChannel.send(
-                                                                        PersistJob.Movies(moviesBuf.toList()),
-                                                                    )
-                                                                    moviesBuf.clear()
-                                                                }
-                                                            }
-                                                            ContentType.Show -> {
-                                                                episodesBuf.add(entry)
-                                                                if (episodesBuf.size >= EPISODES_FLUSH_THRESHOLD) {
-                                                                    persistChannel.send(
-                                                                        PersistJob.Shows(episodesBuf.toList()),
-                                                                    )
-                                                                    episodesBuf.clear()
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    progressTracker.syncAdvance(result.entries.size)
-                                                }
-                                                is ParseResult.Progress -> {
-                                                    m3uParsedTotal = result.parsed
-                                                    _progress.value = Progress.Parsing(
-                                                        result.parsed,
-                                                        result.skipped,
-                                                    )
-                                                }
-                                                is ParseResult.Complete -> {
-                                                    m3uParsedTotal = result.totalParsed
-                                                    progressTracker.syncComplete(result.totalParsed)
-                                                }
-                                            }
-                                        }
-                                        if (moviesBuf.isNotEmpty()) {
-                                            persistChannel.send(PersistJob.Movies(moviesBuf.toList()))
-                                            moviesBuf.clear()
-                                        }
-                                        if (episodesBuf.isNotEmpty()) {
-                                            persistChannel.send(PersistJob.Shows(episodesBuf.toList()))
-                                            episodesBuf.clear()
-                                        }
-                                    } finally {
-                                        persistChannel.close()
-                                        persistJob.join()
-                                    }
-                                }
-                            }
-                        }
+                var jsonOk = false
+                for (slice in slices) {
+                    try {
+                        android.util.Log.i("SyncService", "Xtream JSON sync scope=${slice.name}")
+                        val snapshot = xtreamJson.fetchScope(
+                            host = provider.host,
+                            user = provider.username,
+                            pass = provider.password,
+                            scope = slice,
+                            userAgent = provider.apiUserAgent(),
+                            onProgress = { status ->
+                                _progress.value = Progress.Parsing(totalParsed, 0)
+                                progressTracker.setLabel("${slice.label}: $status")
+                            },
+                        )
+                        _progress.value = Progress.PostProcessing
+                        val parsed = persistSnapshot(snapshot, sourceId, playlistUrl, slice)
+                        totalParsed += parsed
+                        diag = mergeDiagnostics(diag, snapshot, slice)
+                        syncPath = "xtream_json/${slice.name.lowercase()}"
+                        jsonOk = true
+                        // Drop large lists before the next slice.
+                        System.gc()
+                    } catch (e: Throwable) {
+                        android.util.Log.w(
+                            "SyncService",
+                            "Xtream JSON ${slice.name} failed: ${e.message}",
+                        )
+                        if (scope != SyncScope.All) throw e
+                        // All-mode: continue other slices; fall back to M3U
+                        // only if every JSON slice failed.
+                    }
                 }
+                if (!jsonOk && scope == SyncScope.All) {
+                    android.util.Log.w("SyncService", "All JSON slices failed — M3U fallback")
+                    totalParsed = syncM3uScoped(playlistUrl, sourceId, provider, SyncScope.All)
+                    syncPath = "m3u_fallback"
+                } else if (!jsonOk) {
+                    error("Could not sync ${scope.label} from provider API")
+                }
+            } else {
+                totalParsed = syncM3uScoped(playlistUrl, sourceId, provider, scope)
+                syncPath = "m3u/${scope.name.lowercase()}"
             }
 
-            _progress.value = Progress.PostProcessing
-
-            val liveParsed = live.size
-            val moviesParsed = movies.size
-            val seriesParsed = seriesMetaToPersist.size
-
-            persistLive(live, sourceId, playlistUrl)
-            live.clear()
-            if (movies.isNotEmpty()) {
-                persistMovies(movies, sourceId, playlistUrl)
-                movies.clear()
-            }
-            if (episodes.isNotEmpty()) {
-                persistShows(episodes, sourceId, playlistUrl)
-                episodes.clear()
-            }
-            persistSeriesCatalogue(seriesMetaToPersist)
-
-            // Presentation filters only (hidden flags). Never delete rows.
             runCatching { libraryFilter.recomputeHiddenFlags() }
                 .onFailure { e ->
                     android.util.Log.w("SyncService", "recomputeHiddenFlags failed: ${e.message}", e)
                 }
 
-            val liveStored = channelDao.watchCount().first()
-            val moviesStored = movieDao.countAll()
-            val seriesStored = seriesDao.countAll()
-            val moviesVisible = movieDao.countVisible()
-            val seriesVisible = seriesDao.countVisible()
-            val settingsNow = settingsRepo.current()
-            val liveContent = contentDao.byType("live")
-            val liveVisible = liveContent.count { item ->
-                CategoryRegion.matchesRegion(item.groupTitle, settingsNow.countryWhitelist) &&
-                    !CategoryRegion.matchesExcludedCategory(
-                        item.groupTitle,
-                        settingsNow.excludedCategories,
-                    )
-            }
-            val hiddenByRegion = liveContent.count {
-                !CategoryRegion.matchesRegion(it.groupTitle, settingsNow.countryWhitelist)
-            } + (moviesStored - moviesVisible).coerceAtLeast(0)
-
-            diagnosticsStore.update(
-                SyncDiagnostics(
-                    lastSyncAt = Instant.now(),
-                    lastError = null,
-                    syncPath = syncPath,
-                    liveCategories = diagLiveCats,
-                    vodCategories = diagVodCats,
-                    seriesCategories = diagSeriesCats,
-                    totalCategories = diagLiveCats + diagVodCats + diagSeriesCats,
-                    liveProvider = if (diagLiveProvider > 0) diagLiveProvider else liveParsed,
-                    liveParsed = liveParsed,
-                    liveStored = liveStored,
-                    liveVisible = liveVisible,
-                    moviesProvider = if (diagMoviesProvider > 0) diagMoviesProvider else moviesParsed,
-                    moviesParsed = moviesParsed,
-                    moviesStored = moviesStored,
-                    moviesVisible = moviesVisible,
-                    seriesProvider = if (diagSeriesProvider > 0) diagSeriesProvider else seriesParsed,
-                    seriesParsed = seriesParsed,
-                    seriesStored = seriesStored,
-                    seriesVisible = seriesVisible,
-                    hiddenByRegion = hiddenByRegion,
-                    hiddenByCategory = 0,
-                    hiddenByLanguage = (moviesStored - moviesVisible).coerceAtLeast(0),
-                    hiddenCategoriesEstimate = settingsNow.excludedCategories.size,
-                ),
-            )
-            android.util.Log.i(
-                "SyncService",
-                "Sync done path=$syncPath " +
-                    "live=$liveParsed→$liveStored vis=$liveVisible " +
-                    "movies=$moviesParsed→$moviesStored vis=$moviesVisible " +
-                    "series=$seriesParsed→$seriesStored vis=$seriesVisible " +
-                    "m3uLines=$m3uParsedTotal",
-            )
-
-            _progress.value = Progress.Done(
-                totalParsed = liveParsed + moviesParsed + seriesParsed,
-                totalSkipped = 0,
-            )
+            publishDiagnostics(syncPath, diag, totalParsed)
+            _progress.value = Progress.Done(totalParsed = totalParsed, totalSkipped = 0)
         } catch (e: Throwable) {
             val rootCause = generateSequence(e) { it.cause }.last()
             val msg = buildString {
@@ -438,6 +224,229 @@ class SyncService @Inject constructor(
             _progress.value = Progress.Error(msg)
             throw e
         }
+    }
+
+    private suspend fun persistSnapshot(
+        snapshot: XtreamSnapshot,
+        sourceId: Int,
+        sourceKey: String,
+        scope: SyncScope,
+    ): Int {
+        var n = 0
+        when (scope) {
+            SyncScope.Live -> {
+                persistLive(snapshot.live, sourceId, sourceKey)
+                n = snapshot.live.size
+            }
+            SyncScope.Movies -> {
+                persistMovies(snapshot.movies, sourceId, sourceKey)
+                n = snapshot.movies.size
+            }
+            SyncScope.Shows -> {
+                persistSeriesCatalogue(snapshot.seriesMeta)
+                n = snapshot.seriesMeta.size
+            }
+            SyncScope.All -> error("persistSnapshot expects a single slice")
+        }
+        progressTracker.syncComplete(n)
+        return n
+    }
+
+    private fun mergeDiagnostics(
+        base: SyncDiagnostics,
+        snapshot: XtreamSnapshot,
+        scope: SyncScope,
+    ): SyncDiagnostics = when (scope) {
+        SyncScope.Live -> base.copy(
+            liveCategories = snapshot.liveCategories,
+            liveProvider = snapshot.liveProviderCount,
+            liveParsed = snapshot.live.size,
+        )
+        SyncScope.Movies -> base.copy(
+            vodCategories = snapshot.vodCategories,
+            moviesProvider = snapshot.moviesProviderCount,
+            moviesParsed = snapshot.movies.size,
+        )
+        SyncScope.Shows -> base.copy(
+            seriesCategories = snapshot.seriesCategories,
+            seriesProvider = snapshot.seriesProviderCount,
+            seriesParsed = snapshot.seriesMeta.size,
+        )
+        SyncScope.All -> base
+    }
+
+    private suspend fun publishDiagnostics(
+        syncPath: String,
+        partial: SyncDiagnostics,
+        totalParsed: Int,
+    ) {
+        val liveStored = channelDao.watchCount().first()
+        val moviesStored = movieDao.countAll()
+        val seriesStored = seriesDao.countAll()
+        val moviesVisible = movieDao.countVisible()
+        val seriesVisible = seriesDao.countVisible()
+        val settingsNow = settingsRepo.current()
+        val liveContent = contentDao.byType("live")
+        val liveVisible = liveContent.count { item ->
+            CategoryRegion.matchesRegion(item.groupTitle, settingsNow.countryWhitelist) &&
+                !CategoryRegion.matchesExcludedCategory(
+                    item.groupTitle,
+                    settingsNow.excludedCategories,
+                )
+        }
+        diagnosticsStore.update(
+            SyncDiagnostics(
+                lastSyncAt = Instant.now(),
+                lastError = null,
+                syncPath = syncPath,
+                liveCategories = partial.liveCategories,
+                vodCategories = partial.vodCategories,
+                seriesCategories = partial.seriesCategories,
+                totalCategories = partial.liveCategories + partial.vodCategories +
+                    partial.seriesCategories,
+                liveProvider = partial.liveProvider,
+                liveParsed = partial.liveParsed,
+                liveStored = liveStored,
+                liveVisible = liveVisible,
+                moviesProvider = partial.moviesProvider,
+                moviesParsed = partial.moviesParsed,
+                moviesStored = moviesStored,
+                moviesVisible = moviesVisible,
+                seriesProvider = partial.seriesProvider,
+                seriesParsed = partial.seriesParsed,
+                seriesStored = seriesStored,
+                seriesVisible = seriesVisible,
+                hiddenByRegion = (liveStored - liveVisible).coerceAtLeast(0),
+                hiddenByLanguage = (moviesStored - moviesVisible).coerceAtLeast(0),
+                hiddenCategoriesEstimate = settingsNow.excludedCategories.size,
+            ),
+        )
+        android.util.Log.i(
+            "SyncService",
+            "Sync done path=$syncPath totalParsed=$totalParsed " +
+                "stored live=$liveStored movies=$moviesStored series=$seriesStored",
+        )
+    }
+
+    /**
+     * M3U path with optional content-type filter for [scope].
+     * @return number of entries persisted for this scope.
+     */
+    private suspend fun syncM3uScoped(
+        playlistUrl: String,
+        sourceId: Int,
+        provider: com.strata.tv.data.settings.ProviderConfig,
+        scope: SyncScope,
+    ): Int {
+        val live = mutableListOf<M3uEntry>()
+        var moviesPersisted = 0
+        var showsPersisted = 0
+        val wantLive = scope == SyncScope.All || scope == SyncScope.Live
+        val wantMovies = scope == SyncScope.All || scope == SyncScope.Movies
+        val wantShows = scope == SyncScope.All || scope == SyncScope.Shows
+
+        withContext(Dispatchers.IO) {
+            fetchPlaylistWithRetry(playlistUrl, provider.apiUserAgent())
+                .use { response ->
+                    if (!response.isSuccessful) {
+                        error("HTTP ${response.code} fetching playlist")
+                    }
+                    val body = response.body ?: error("Empty playlist body")
+                    val contentType = response.header("Content-Type").orEmpty()
+                    val source = body.source()
+                    source.request(512)
+                    val peek = source.peek().readUtf8(
+                        minOf(512L, source.buffer.size),
+                    ).trimStart()
+                    val isJsonResponse = contentType.contains("json", ignoreCase = true) ||
+                        peek.startsWith("{") || peek.startsWith("[")
+                    if (isJsonResponse) {
+                        error("Playlist URL returned JSON; configure Xtream credentials")
+                    }
+
+                    body.charStream().buffered().useLines { lines ->
+                        coroutineScope {
+                            val persistChannel = kotlinx.coroutines.channels
+                                .Channel<PersistJob>(capacity = 2)
+                            val persistJob = launch(Dispatchers.IO) {
+                                for (job in persistChannel) {
+                                    when (job) {
+                                        is PersistJob.Movies -> {
+                                            persistMovies(job.entries, sourceId, playlistUrl)
+                                            moviesPersisted += job.entries.size
+                                        }
+                                        is PersistJob.Shows -> {
+                                            persistShows(job.entries, sourceId, playlistUrl)
+                                            showsPersisted += job.entries.size
+                                        }
+                                    }
+                                }
+                            }
+                            val moviesBuf = ArrayList<M3uEntry>(MOVIES_FLUSH_THRESHOLD)
+                            val episodesBuf = ArrayList<M3uEntry>(EPISODES_FLUSH_THRESHOLD)
+                            try {
+                                parser.parseLines(lines).collect { result ->
+                                    when (result) {
+                                        is ParseResult.Batch -> {
+                                            for (entry in result.entries) {
+                                                when (entry.contentType) {
+                                                    ContentType.Live ->
+                                                        if (wantLive) live.add(entry)
+                                                    ContentType.Movie -> if (wantMovies) {
+                                                        moviesBuf.add(entry)
+                                                        if (moviesBuf.size >= MOVIES_FLUSH_THRESHOLD) {
+                                                            persistChannel.send(
+                                                                PersistJob.Movies(moviesBuf.toList()),
+                                                            )
+                                                            moviesBuf.clear()
+                                                        }
+                                                    }
+                                                    ContentType.Show -> if (wantShows) {
+                                                        episodesBuf.add(entry)
+                                                        if (episodesBuf.size >= EPISODES_FLUSH_THRESHOLD) {
+                                                            persistChannel.send(
+                                                                PersistJob.Shows(episodesBuf.toList()),
+                                                            )
+                                                            episodesBuf.clear()
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            progressTracker.syncAdvance(result.entries.size)
+                                        }
+                                        is ParseResult.Progress -> {
+                                            _progress.value = Progress.Parsing(
+                                                result.parsed,
+                                                result.skipped,
+                                            )
+                                        }
+                                        is ParseResult.Complete -> {
+                                            progressTracker.syncComplete(result.totalParsed)
+                                        }
+                                    }
+                                }
+                                if (moviesBuf.isNotEmpty()) {
+                                    persistChannel.send(PersistJob.Movies(moviesBuf.toList()))
+                                    moviesBuf.clear()
+                                }
+                                if (episodesBuf.isNotEmpty()) {
+                                    persistChannel.send(PersistJob.Shows(episodesBuf.toList()))
+                                    episodesBuf.clear()
+                                }
+                            } finally {
+                                persistChannel.close()
+                                persistJob.join()
+                            }
+                        }
+                    }
+                }
+        }
+
+        _progress.value = Progress.PostProcessing
+        if (wantLive) {
+            persistLive(live, sourceId, playlistUrl)
+        }
+        return live.size + moviesPersisted + showsPersisted
     }
 
     // -------------------------------------------------------------------------

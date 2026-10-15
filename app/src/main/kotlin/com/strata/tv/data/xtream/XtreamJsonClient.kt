@@ -2,6 +2,7 @@ package com.strata.tv.data.xtream
 
 import android.util.Log
 import com.strata.tv.data.m3u.M3uEntry
+import com.strata.tv.data.repo.SyncScope
 import com.strata.tv.domain.ContentType
 import com.strata.tv.domain.MovieDeduplicator
 import com.strata.tv.domain.TitleParser
@@ -67,63 +68,107 @@ class XtreamJsonClient @Inject constructor(
      * @param onProgress Called with a human-readable status string for
      *   the sync indicator.
      */
+    /**
+     * Fetch one catalogue slice.  Prefer calling Live / Movies / Shows
+     * separately (or via [SyncScope.All] sequenced in SyncService) so
+     * Fire Stick never holds all three giant JSON arrays at once.
+     */
+    suspend fun fetchScope(
+        host: String,
+        user: String,
+        pass: String,
+        scope: SyncScope,
+        userAgent: String = DEFAULT_USER_AGENT,
+        onProgress: (String) -> Unit = {},
+    ): XtreamSnapshot = withContext(Dispatchers.IO) {
+        require(scope != SyncScope.All) {
+            "fetchScope does not accept All — call Live/Movies/Shows separately"
+        }
+        val base = host.trimEnd('/')
+        when (scope) {
+            SyncScope.Live -> {
+                onProgress("Loading live categories")
+                val liveCats = fetchAction<XtreamCategory>(
+                    base, user, pass, "get_live_categories", userAgent,
+                ).associate { it.id to it.name }
+                onProgress("Loading live channels")
+                val liveDtos = fetchAction<XtreamLiveStream>(
+                    base, user, pass, "get_live_streams", userAgent,
+                )
+                val liveEntries = liveDtos.mapNotNull { it.toEntry(base, user, pass, liveCats) }
+                Log.i(TAG, "Xtream live: provider=${liveDtos.size} parsed=${liveEntries.size}")
+                XtreamSnapshot(
+                    live = liveEntries,
+                    liveCategories = liveCats.size,
+                    liveProviderCount = liveDtos.size,
+                )
+            }
+            SyncScope.Movies -> {
+                onProgress("Loading movie categories")
+                val vodCats = fetchAction<XtreamCategory>(
+                    base, user, pass, "get_vod_categories", userAgent,
+                ).associate { it.id to it.name }
+                onProgress("Loading movies")
+                val vodDtos = fetchAction<XtreamVodStream>(
+                    base, user, pass, "get_vod_streams", userAgent,
+                )
+                val movieEntries = vodDtos.mapNotNull { it.toEntry(base, user, pass, vodCats) }
+                Log.i(TAG, "Xtream movies: provider=${vodDtos.size} parsed=${movieEntries.size}")
+                XtreamSnapshot(
+                    movies = movieEntries,
+                    vodCategories = vodCats.size,
+                    moviesProviderCount = vodDtos.size,
+                )
+            }
+            SyncScope.Shows -> {
+                onProgress("Loading series categories")
+                val seriesCats = fetchAction<XtreamCategory>(
+                    base, user, pass, "get_series_categories", userAgent,
+                ).associate { it.id to it.name }
+                onProgress("Loading series")
+                val seriesDtosRaw = fetchAction<XtreamSeries>(
+                    base, user, pass, "get_series", userAgent,
+                )
+                val seriesDtos = seriesDtosRaw
+                    .filter { it.seriesId > 0 && it.name.isNotBlank() }
+                    .distinctBy { it.seriesId }
+                val seriesEntries = seriesDtos.map { it.toSeriesEntry(seriesCats) }
+                Log.i(
+                    TAG,
+                    "Xtream series: provider=${seriesDtosRaw.size} " +
+                        "unique=${seriesDtos.size} parsed=${seriesEntries.size}",
+                )
+                XtreamSnapshot(
+                    seriesMeta = seriesEntries,
+                    seriesCategories = seriesCats.size,
+                    seriesProviderCount = seriesDtosRaw.size,
+                )
+            }
+            SyncScope.All -> error("unreachable")
+        }
+    }
+
+    /** @deprecated Prefer [fetchScope] — kept for any leftover call sites. */
     suspend fun fetchAll(
         host: String,
         user: String,
         pass: String,
         userAgent: String = DEFAULT_USER_AGENT,
         onProgress: (String) -> Unit = {},
-    ): XtreamSnapshot = withContext(Dispatchers.IO) {
-        val base = host.trimEnd('/')
-
-        onProgress("Loading categories")
-        val liveCatList = fetchAction<XtreamCategory>(base, user, pass, "get_live_categories", userAgent)
-        val vodCatList = fetchAction<XtreamCategory>(base, user, pass, "get_vod_categories", userAgent)
-        val seriesCatList = fetchAction<XtreamCategory>(base, user, pass, "get_series_categories", userAgent)
-        val liveCats = liveCatList.associate { it.id to it.name }
-        val vodCats = vodCatList.associate { it.id to it.name }
-        val seriesCats = seriesCatList.associate { it.id to it.name }
-        // Counts only — never log host / credentials.
-        Log.i(
-            TAG,
-            "Xtream categories: live=${liveCats.size} vod=${vodCats.size} series=${seriesCats.size}",
-        )
-
-        onProgress("Loading live channels")
-        val liveDtos = fetchAction<XtreamLiveStream>(base, user, pass, "get_live_streams", userAgent)
-        val liveEntries = liveDtos.mapNotNull { it.toEntry(base, user, pass, liveCats) }
-        Log.i(TAG, "Xtream live: provider=${liveDtos.size} parsed=${liveEntries.size}")
-
-        onProgress("Loading movies")
-        val vodDtos = fetchAction<XtreamVodStream>(base, user, pass, "get_vod_streams", userAgent)
-        val movieEntries = vodDtos.mapNotNull { it.toEntry(base, user, pass, vodCats) }
-        Log.i(TAG, "Xtream movies: provider=${vodDtos.size} parsed=${movieEntries.size}")
-
-        onProgress("Loading series")
-        val seriesDtosRaw = fetchAction<XtreamSeries>(base, user, pass, "get_series", userAgent)
-        // Drop malformed rows (series_id 0) then collapse duplicates.
-        val seriesDtos = seriesDtosRaw
-            .filter { it.seriesId > 0 && it.name.isNotBlank() }
-            .distinctBy { it.seriesId }
-        val seriesEntries = seriesDtos.map { it.toSeriesEntry(seriesCats) }
-        Log.i(
-            TAG,
-            "Xtream series: provider=${seriesDtosRaw.size} unique=${seriesDtos.size} parsed=${seriesEntries.size}",
-        )
-
-        // Episodes are lazy-loaded on detail open via get_series_info
-        // (bulk fetch trips provider rate limits).
-
-        XtreamSnapshot(
-            live = liveEntries,
-            movies = movieEntries,
-            seriesMeta = seriesEntries,
-            liveCategories = liveCats.size,
-            vodCategories = vodCats.size,
-            seriesCategories = seriesCats.size,
-            liveProviderCount = liveDtos.size,
-            moviesProviderCount = vodDtos.size,
-            seriesProviderCount = seriesDtosRaw.size,
+    ): XtreamSnapshot {
+        val live = fetchScope(host, user, pass, SyncScope.Live, userAgent, onProgress)
+        val movies = fetchScope(host, user, pass, SyncScope.Movies, userAgent, onProgress)
+        val shows = fetchScope(host, user, pass, SyncScope.Shows, userAgent, onProgress)
+        return XtreamSnapshot(
+            live = live.live,
+            movies = movies.movies,
+            seriesMeta = shows.seriesMeta,
+            liveCategories = live.liveCategories,
+            vodCategories = movies.vodCategories,
+            seriesCategories = shows.seriesCategories,
+            liveProviderCount = live.liveProviderCount,
+            moviesProviderCount = movies.moviesProviderCount,
+            seriesProviderCount = shows.seriesProviderCount,
         )
     }
 
@@ -296,11 +341,11 @@ data class XtreamSeriesMeta(
     val cover: String,
 )
 
-/** Output of [XtreamJsonClient.fetchAll] — already-classified entry lists. */
+/** Output of [XtreamJsonClient.fetchScope] — already-classified entry lists. */
 data class XtreamSnapshot(
-    val live: List<M3uEntry>,
-    val movies: List<M3uEntry>,
-    val seriesMeta: List<XtreamSeriesMeta>,
+    val live: List<M3uEntry> = emptyList(),
+    val movies: List<M3uEntry> = emptyList(),
+    val seriesMeta: List<XtreamSeriesMeta> = emptyList(),
     val liveCategories: Int = 0,
     val vodCategories: Int = 0,
     val seriesCategories: Int = 0,

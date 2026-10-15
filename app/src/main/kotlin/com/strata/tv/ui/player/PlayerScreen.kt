@@ -12,6 +12,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,10 +29,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Forward30
-import androidx.compose.material.icons.filled.PauseCircleFilled
-import androidx.compose.material.icons.filled.PlayCircleFilled
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.outlined.ClosedCaption
+import androidx.compose.material.icons.outlined.List
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
@@ -156,11 +161,17 @@ fun PlayerScreen(
                         else -> false
                     }
                 }
-                // While the episode overlay is up, only intercept Back
-                // (to dismiss it) and Up (to return focus to the
-                // controls).  Everything else — Left/Right/Center —
-                // must reach the LazyRow so the user can navigate and
-                // select an episode card.
+                // Track / episode overlays: Back dismisses; other keys
+                // reach the overlay's focusable chips/cards.
+                if (state.trackPanelVisible) {
+                    return@onPreviewKeyEvent when (event.nativeKeyEvent.keyCode) {
+                        KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
+                            viewModel.closeTrackPanel()
+                            true
+                        }
+                        else -> false
+                    }
+                }
                 if (state.episodeOverlayVisible) {
                     return@onPreviewKeyEvent when (event.nativeKeyEvent.keyCode) {
                         KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
@@ -194,16 +205,22 @@ fun PlayerScreen(
                         true
                     }
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                        viewModel.seekRelative(30_000)
+                        viewModel.seekRelative(10_000)
                         viewModel.showControls()
                         true
                     }
-                    // Fav mode: Menu button toggles fav zapping (#11)
+                    // Live: Menu toggles fav zapping. VOD: audio/subs panel.
                     KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_BOOKMARK -> {
-                        if (isLive) {
-                            viewModel.toggleFavMode()
-                            true
-                        } else false
+                        when {
+                            isLive -> {
+                                viewModel.toggleFavMode()
+                                true
+                            }
+                            else -> {
+                                viewModel.toggleTrackPanel()
+                                true
+                            }
+                        }
                     }
                     // D-pad Up: zap favourites if fav mode on, else normal channel switch.
                     KeyEvent.KEYCODE_DPAD_UP -> {
@@ -258,6 +275,12 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = viewModel.player
                     useController = false
+                    // Keep Media3's built-in cue renderer so selected
+                    // subtitle tracks actually paint on screen.
+                    subtitleView?.apply {
+                        setUserDefaultStyle()
+                        setUserDefaultTextSize()
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize(),
@@ -360,230 +383,35 @@ fun PlayerScreen(
             }
         }
 
-        // -- Controls overlay --------------------------------------------
+        // -- Netflix-style controls overlay ------------------------------
+        val subs by viewModel.subtitleTracks.collectAsState()
+        val audios by viewModel.audioTracks.collectAsState()
         AnimatedVisibility(
-            visible = state.controlsVisible,
-            enter = fadeIn(tween(250)),
-            exit = fadeOut(tween(400)),
+            visible = state.controlsVisible && !state.trackPanelVisible,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(320)),
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Top gradient
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(120.dp)
-                        .align(Alignment.TopCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0xCC000000),
-                                    Color.Transparent,
-                                ),
-                            ),
-                        ),
-                )
-
-                // Bottom gradient
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp)
-                        .align(Alignment.BottomCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color(0xCC000000),
-                                ),
-                            ),
-                        ),
-                )
-
-                // Top bar -- back + title + FAV badge + live badge
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 24.dp, top = 24.dp, end = 24.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = state.channelDisplayName ?: displayTitle,
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f),
-                    )
-                    // FAV badge (#11)
-                    if (state.favModeEnabled) {
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(StrataColors.AccentSecondary)
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            Text(
-                                text = "FAV",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
-                    // CC toggle
-                    val subs by viewModel.subtitleTracks.collectAsState()
-                    if (subs.isNotEmpty()) {
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(
-                                    if (state.subtitlesEnabled) StrataColors.AccentPrimary
-                                    else StrataColors.SurfaceFloat,
-                                )
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            Text(
-                                text = "CC",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
-
-                    if (isLive) {
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(StrataColors.StatusLive)
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            Text(
-                                text = "LIVE",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
-
-                    // Date/time clock — top-right of the controls overlay.
-                    Spacer(Modifier.width(12.dp))
-                    ClockDisplay()
-                }
-
-                // Bottom controls area
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    // VOD progress bar
-                    if (!isLive) {
-                        val player = viewModel.player
-                        // Ticker so the bar actually moves — previously read
-                        // player.currentPosition directly in composition, which
-                        // is a non-observable snapshot that only refreshed when
-                        // something else caused a recomposition (idioms #4 —
-                        // visible "frozen progress bar" bug).
-                        var positionMs by remember { mutableLongStateOf(0L) }
-                        var durationMs by remember { mutableLongStateOf(1L) }
-                        LaunchedEffect(state.isPlaying, state.controlsVisible) {
-                            while (true) {
-                                positionMs = player.currentPosition.coerceAtLeast(0)
-                                durationMs = player.duration.coerceAtLeast(1)
-                                kotlinx.coroutines.delay(500)
-                            }
-                        }
-                        val progress = if (durationMs > 0) {
-                            (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
-                        } else 0f
-
-                        // Time labels
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(
-                                text = formatTime(positionMs),
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 12.sp,
-                            )
-                            Text(
-                                text = "-${formatTime((durationMs - positionMs).coerceAtLeast(0))}",
-                                color = Color.White.copy(alpha = 0.6f),
-                                fontSize = 12.sp,
-                            )
-                        }
-                        Spacer(Modifier.height(6.dp))
-
-                        // Progress bar
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(Color.White.copy(alpha = 0.2f)),
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(progress)
-                                    .height(4.dp)
-                                    .clip(RoundedCornerShape(2.dp))
-                                    .background(StrataColors.AccentPrimary),
-                            )
-                        }
-                        Spacer(Modifier.height(16.dp))
-                    }
-
-                    // Transport buttons
-                    Row(
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (!isLive) {
-                            Icon(
-                                imageVector = Icons.Filled.Replay10,
-                                contentDescription = "Rewind 10 seconds",
-                                tint = Color.White.copy(alpha = 0.85f),
-                                modifier = Modifier.size(40.dp),
-                            )
-                            Spacer(Modifier.width(28.dp))
-                        }
-                        Icon(
-                            imageVector = if (state.isPlaying) {
-                                Icons.Filled.PauseCircleFilled
-                            } else {
-                                Icons.Filled.PlayCircleFilled
-                            },
-                            contentDescription = if (state.isPlaying) "Pause" else "Play",
-                            tint = Color.White,
-                            modifier = Modifier.size(60.dp),
-                        )
-                        if (!isLive) {
-                            Spacer(Modifier.width(28.dp))
-                            Icon(
-                                imageVector = Icons.Filled.Forward30,
-                                contentDescription = "Forward 30 seconds",
-                                tint = Color.White.copy(alpha = 0.85f),
-                                modifier = Modifier.size(40.dp),
-                            )
-                        }
-                    }
-                }
-            }
+            NetflixPlayerChrome(
+                title = state.channelDisplayName ?: displayTitle,
+                subtitle = buildPlayerSubtitle(
+                    isLive = isLive,
+                    contentType = contentType,
+                    seriesTitle = seriesTitle,
+                    seasonNumber = state.currentSeasonNumber ?: seasonNumber,
+                    episodeNumber = state.currentEpisodeNumber ?: episodeNumber,
+                ),
+                isLive = isLive,
+                isPlaying = state.isPlaying,
+                favMode = state.favModeEnabled,
+                hasSubtitles = subs.isNotEmpty(),
+                hasMultiAudio = audios.size > 1,
+                subtitlesOn = state.subtitlesEnabled,
+                showEpisodes = !isLive && contentType == "show" && seriesTitle != null,
+                player = viewModel.player,
+                controlsVisible = state.controlsVisible,
+                onOpenTracks = { viewModel.openTrackPanel() },
+                onOpenEpisodes = { viewModel.toggleEpisodeOverlay() },
+            )
         }
 
         // -- Channel switch overlay (top banner) -------------------------
@@ -635,10 +463,329 @@ fun PlayerScreen(
                 )
             }
         }
+
+        // -- Audio / subtitle track picker ------------------------------
+        val subtitleTracks by viewModel.subtitleTracks.collectAsState()
+        val audioTracks by viewModel.audioTracks.collectAsState()
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            TrackSelectionOverlay(
+                visible = state.trackPanelVisible,
+                audioTracks = audioTracks,
+                subtitleTracks = subtitleTracks,
+                subtitlesEnabled = state.subtitlesEnabled,
+                onSelectAudio = { viewModel.selectAudioTrack(it.groupIndex, it.trackIndex) },
+                onSelectSubtitle = { viewModel.selectSubtitleTrack(it.groupIndex, it.trackIndex) },
+                onDisableSubtitles = { viewModel.disableSubtitles() },
+            )
+        }
     }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
+    }
+}
+
+// -- Netflix-style chrome ------------------------------------------------
+
+private fun buildPlayerSubtitle(
+    isLive: Boolean,
+    contentType: String,
+    seriesTitle: String?,
+    seasonNumber: Int?,
+    episodeNumber: Int?,
+): String? {
+    if (isLive) return "Live TV"
+    if (contentType == "show" && seasonNumber != null && episodeNumber != null) {
+        return "S${seasonNumber.toString().padStart(2, '0')}  E${episodeNumber.toString().padStart(2, '0')}"
+    }
+    return null
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun NetflixPlayerChrome(
+    title: String,
+    subtitle: String?,
+    isLive: Boolean,
+    isPlaying: Boolean,
+    favMode: Boolean,
+    hasSubtitles: Boolean,
+    hasMultiAudio: Boolean,
+    subtitlesOn: Boolean,
+    showEpisodes: Boolean,
+    player: Player,
+    controlsVisible: Boolean,
+    onOpenTracks: () -> Unit,
+    onOpenEpisodes: () -> Unit,
+) {
+    var positionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(1L) }
+    LaunchedEffect(isPlaying, controlsVisible) {
+        while (true) {
+            positionMs = player.currentPosition.coerceAtLeast(0)
+            durationMs = player.duration.coerceAtLeast(1)
+            kotlinx.coroutines.delay(400)
+        }
+    }
+    val progress = if (durationMs > 0) {
+        (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    } else 0f
+    val remaining = (durationMs - positionMs).coerceAtLeast(0)
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Tall Netflix-style edge fades
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(140.dp)
+                .align(Alignment.TopCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xE6000000), Color.Transparent),
+                    ),
+                ),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color(0xF2000000)),
+                    ),
+                ),
+        )
+
+        // Top: back only + status chips (title lives in the bottom stack)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 28.dp, top = 28.dp, end = 28.dp)
+                .align(Alignment.TopCenter),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = Color.White,
+                modifier = Modifier.size(28.dp),
+            )
+            Spacer(Modifier.weight(1f))
+            if (favMode) {
+                StatusChip(text = "FAV")
+                Spacer(Modifier.width(8.dp))
+            }
+            if (isLive) {
+                StatusChip(text = "LIVE")
+                Spacer(Modifier.width(8.dp))
+            }
+            ClockDisplay()
+        }
+
+        // Center transport — large when paused (Netflix pause state)
+        Row(
+            modifier = Modifier.align(Alignment.Center),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            if (!isLive) {
+                Icon(
+                    imageVector = Icons.Filled.Replay10,
+                    contentDescription = "Rewind 10 seconds",
+                    tint = Color.White.copy(alpha = 0.92f),
+                    modifier = Modifier.size(if (isPlaying) 44.dp else 52.dp),
+                )
+                Spacer(Modifier.width(36.dp))
+            }
+            Box(
+                modifier = Modifier
+                    .size(if (isPlaying) 72.dp else 88.dp)
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(Color.White.copy(alpha = if (isPlaying) 0.12f else 0.22f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = Color.White,
+                    modifier = Modifier.size(if (isPlaying) 40.dp else 48.dp),
+                )
+            }
+            if (!isLive) {
+                Spacer(Modifier.width(36.dp))
+                Icon(
+                    imageVector = Icons.Filled.Forward10,
+                    contentDescription = "Forward 10 seconds",
+                    tint = Color.White.copy(alpha = 0.92f),
+                    modifier = Modifier.size(if (isPlaying) 44.dp else 52.dp),
+                )
+            }
+        }
+
+        // Bottom stack: title → scrubber → secondary actions
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 36.dp, vertical = 28.dp),
+        ) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                letterSpacing = (-0.3).sp,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = subtitle,
+                    color = Color.White.copy(alpha = 0.72f),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+
+            if (!isLive) {
+                Spacer(Modifier.height(18.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    // Scrubber with playhead knob
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(20.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color.White.copy(alpha = 0.28f)),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progress)
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color.White),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progress)
+                                .height(20.dp),
+                            contentAlignment = Alignment.CenterEnd,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clip(RoundedCornerShape(percent = 50))
+                                    .background(Color.White),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        text = formatTime(remaining),
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(18.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (hasSubtitles || hasMultiAudio) {
+                    ActionPill(
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Outlined.ClosedCaption,
+                                contentDescription = null,
+                                tint = if (subtitlesOn) StrataColors.SurfaceVoid else Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                        label = "Audio & Subtitles",
+                        selected = subtitlesOn,
+                        onClick = onOpenTracks,
+                    )
+                }
+                if (showEpisodes) {
+                    ActionPill(
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Outlined.List,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                        label = "Episodes",
+                        selected = false,
+                        onClick = onOpenEpisodes,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusChip(text: String) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color.White.copy(alpha = 0.18f))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+        )
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun ActionPill(
+    icon: @Composable () -> Unit,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (selected) Color.White else Color.White.copy(alpha = 0.14f))
+            .clickable(onClick = onClick)
+            .focusable()
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        icon()
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = label,
+            color = if (selected) StrataColors.SurfaceVoid else Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 

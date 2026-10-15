@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
@@ -37,6 +38,8 @@ import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Size
 import com.strata.tv.ui.theme.StrataColors
 
 /**
@@ -110,8 +113,14 @@ fun PosterCard(
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (!posterUrl.isNullOrBlank()) {
+                val context = LocalContext.current
                 AsyncImage(
-                    model = posterUrl,
+                    model = ImageRequest.Builder(context)
+                        .data(posterUrl)
+                        // Decode near card pixel size — saves Fire Stick RAM
+                        // and speeds first paint on long category rails.
+                        .size(Size(280, 420))
+                        .build(),
                     contentDescription = title,
                     contentScale = imageScale,
                     modifier = Modifier.fillMaxSize(),

@@ -156,6 +156,17 @@ class PlayerViewModel @Inject constructor(
         .setMediaSourceFactory(mediaSourceFactory)
         .setRenderersFactory(renderersFactory)
         .build()
+        .also { exo ->
+            // Prefer English text when the user turns CC on; never force
+            // captions on by default (Fire Stick CaptioningManager decides
+            // auto-enable).  Undetermined-language tracks stay selectable.
+            exo.trackSelectionParameters = exo.trackSelectionParameters
+                .buildUpon()
+                .setPreferredTextLanguage("en")
+                .setSelectUndeterminedTextLanguage(true)
+                .setPreferredAudioLanguage("en")
+                .build()
+        }
 
     // ── UI state ─────────────────────────────────────────────────────
 
@@ -239,9 +250,12 @@ class PlayerViewModel @Inject constructor(
     private var variantUrls: List<String> = emptyList()
     private var variantIndex = 0
 
-    // ── Subtitle tracks ─────────────────────────────────────────────
+    // ── Subtitle / audio tracks ─────────────────────────────────────
     private val _subtitleTracks = MutableStateFlow<List<SubtitleTrack>>(emptyList())
     val subtitleTracks: StateFlow<List<SubtitleTrack>> = _subtitleTracks.asStateFlow()
+
+    private val _audioTracks = MutableStateFlow<List<AudioTrack>>(emptyList())
+    val audioTracks: StateFlow<List<AudioTrack>> = _audioTracks.asStateFlow()
 
     // ── Fav mode state (#11) ─────────────────────────────────────────
 
@@ -318,7 +332,8 @@ class PlayerViewModel @Inject constructor(
             }
 
             if (ended) {
-                saveFullContinueWatching()
+                // Finished — remove from Continue Watching (don't leave at 100%).
+                saveFullContinueWatching(forceFinished = true)
                 maybeStartAutoplay()
             }
         }
@@ -336,15 +351,11 @@ class PlayerViewModel @Inject constructor(
                 saveFullContinueWatching()
             }
 
-            // Pause-button-hide bug fix: when playback state changes
-            // (e.g. user pressed pause), reset the auto-hide timer so the
-            // controls reliably fade after 4 s of inactivity.  Previously
-            // only the key handler called showControls(), which started a
-            // timer keyed to the moment of the key press — but the
-            // resulting recompositions / focus side-effects could keep
-            // the controls pinned visible.  Re-arming the timer here on
-            // the *actual* play/pause edge guarantees a hide attempt.
-            if (wasPlaying != isPlaying && _uiState.value.controlsVisible) {
+            // Netflix-style: pause pins the chrome; resume re-arms auto-hide.
+            if (!isPlaying && wasPlaying) {
+                hideJob?.cancel()
+                _uiState.update { it.copy(controlsVisible = true) }
+            } else if (isPlaying && !wasPlaying && _uiState.value.controlsVisible) {
                 restartHideTimer()
             }
         }
@@ -409,24 +420,52 @@ class PlayerViewModel @Inject constructor(
         }
 
         override fun onTracksChanged(tracks: Tracks) {
-            // Update available subtitle tracks when the stream's tracks change.
             val subs = mutableListOf<SubtitleTrack>()
-            for (group in tracks.groups) {
-                if (group.type != C.TRACK_TYPE_TEXT) continue
-                for (i in 0 until group.length) {
-                    val format = group.getTrackFormat(i)
-                    val label = format.label
-                        ?: format.language?.uppercase()
-                        ?: "Track ${subs.size + 1}"
-                    subs.add(SubtitleTrack(
-                        groupIndex = tracks.groups.indexOf(group),
-                        trackIndex = i,
-                        label = label,
-                        isSelected = group.isTrackSelected(i),
-                    ))
+            val audios = mutableListOf<AudioTrack>()
+            for (groupIndex in 0 until tracks.groups.size) {
+                val group = tracks.groups[groupIndex]
+                when (group.type) {
+                    C.TRACK_TYPE_TEXT -> {
+                        for (i in 0 until group.length) {
+                            if (!group.isTrackSupported(i)) continue
+                            val format = group.getTrackFormat(i)
+                            val label = format.label
+                                ?: format.language?.uppercase()
+                                ?: "Subtitle ${subs.size + 1}"
+                            subs.add(
+                                SubtitleTrack(
+                                    groupIndex = groupIndex,
+                                    trackIndex = i,
+                                    label = label,
+                                    language = format.language.orEmpty(),
+                                    isSelected = group.isTrackSelected(i),
+                                ),
+                            )
+                        }
+                    }
+                    C.TRACK_TYPE_AUDIO -> {
+                        for (i in 0 until group.length) {
+                            if (!group.isTrackSupported(i)) continue
+                            val format = group.getTrackFormat(i)
+                            val lang = format.language?.uppercase()
+                            val label = format.label
+                                ?: lang
+                                ?: "Audio ${audios.size + 1}"
+                            audios.add(
+                                AudioTrack(
+                                    groupIndex = groupIndex,
+                                    trackIndex = i,
+                                    label = label,
+                                    language = format.language.orEmpty(),
+                                    isSelected = group.isTrackSelected(i),
+                                ),
+                            )
+                        }
+                    }
                 }
             }
             _subtitleTracks.value = subs
+            _audioTracks.value = audios
             _uiState.update { it.copy(subtitlesEnabled = subs.any { t -> t.isSelected }) }
         }
     }
@@ -641,14 +680,18 @@ class PlayerViewModel @Inject constructor(
         return true
     }
 
-    // ── Subtitle API ────────────────────────────────────────────────
+    // ── Subtitle / audio API ────────────────────────────────────────
 
     /** Select a specific subtitle track by its group and track index. */
     fun selectSubtitleTrack(groupIndex: Int, trackIndex: Int) {
-        val group = player.currentTracks.groups.getOrNull(groupIndex) ?: return
+        val groups = player.currentTracks.groups
+        if (groupIndex !in 0 until groups.size) return
+        val group = groups[groupIndex]
+        if (group.type != C.TRACK_TYPE_TEXT) return
         val override = TrackSelectionOverride(group.mediaTrackGroup, trackIndex)
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setOverrideForType(override)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .build()
@@ -659,9 +702,59 @@ class PlayerViewModel @Inject constructor(
     fun disableSubtitles() {
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .build()
         _uiState.update { it.copy(subtitlesEnabled = false) }
+    }
+
+    /** Toggle subtitles: off → first/English track; on → off. */
+    fun toggleSubtitles() {
+        if (_uiState.value.subtitlesEnabled) {
+            disableSubtitles()
+            return
+        }
+        val tracks = _subtitleTracks.value
+        if (tracks.isEmpty()) return
+        val preferred = tracks.firstOrNull {
+            it.language.equals("en", ignoreCase = true) ||
+                it.language.equals("eng", ignoreCase = true) ||
+                it.label.contains("eng", ignoreCase = true) ||
+                it.label.contains("english", ignoreCase = true)
+        } ?: tracks.first()
+        selectSubtitleTrack(preferred.groupIndex, preferred.trackIndex)
+    }
+
+    /** Select an audio track. */
+    fun selectAudioTrack(groupIndex: Int, trackIndex: Int) {
+        val groups = player.currentTracks.groups
+        if (groupIndex !in 0 until groups.size) return
+        val group = groups[groupIndex]
+        if (group.type != C.TRACK_TYPE_AUDIO) return
+        val override = TrackSelectionOverride(group.mediaTrackGroup, trackIndex)
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .setOverrideForType(override)
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+            .build()
+    }
+
+    fun openTrackPanel() {
+        if (_subtitleTracks.value.isEmpty() && _audioTracks.value.isEmpty()) return
+        hideJob?.cancel()
+        _uiState.update {
+            it.copy(trackPanelVisible = true, controlsVisible = true, episodeOverlayVisible = false)
+        }
+    }
+
+    fun closeTrackPanel() {
+        _uiState.update { it.copy(trackPanelVisible = false) }
+        showControls()
+    }
+
+    fun toggleTrackPanel() {
+        if (_uiState.value.trackPanelVisible) closeTrackPanel() else openTrackPanel()
     }
 
     /**
@@ -1017,9 +1110,13 @@ class PlayerViewModel @Inject constructor(
 
     private fun restartHideTimer() {
         hideJob?.cancel()
+        // Netflix-style: keep chrome up while paused.
+        if (!_uiState.value.isPlaying) return
         hideJob = viewModelScope.launch {
-            delay(4_000)
-            _uiState.update { it.copy(controlsVisible = false) }
+            delay(3_500)
+            if (_uiState.value.isPlaying && !_uiState.value.trackPanelVisible) {
+                _uiState.update { it.copy(controlsVisible = false) }
+            }
         }
     }
 
@@ -1043,24 +1140,32 @@ class PlayerViewModel @Inject constructor(
      * internal tracker will still mark the table dirty).  The key point
      * is the *caller* throttles to 30s so any downstream cost is minimal.
      */
+    private fun isFinished(posMs: Long, totalMs: Long, forceFinished: Boolean): Boolean {
+        if (forceFinished) return true
+        if (totalMs <= 0) return false
+        return (totalMs - posMs) <= CREDITS_THRESHOLD_MS
+    }
+
     private fun saveSilentContinueWatching() {
         // Live TV doesn't belong in Continue Watching — there's no
         // meaningful resume position for a linear channel.
         if (isLive) return
         val posMs = player.currentPosition
         if (posMs < 5_000) return
+        val totalMs = player.duration.coerceAtLeast(0)
+        val id = contentId.ifBlank { title }
         viewModelScope.launch {
+            if (isFinished(posMs, totalMs, forceFinished = false)) {
+                cwDao.delete(id)
+                return@launch
+            }
             cwDao.upsertSilent(
-                // Real content_id hash where available; fall back to
-                // title only when an old caller path hasn't been
-                // upgraded yet.  See [contentId] kdoc for why title
-                // is a poor primary key.
-                contentId = contentId.ifBlank { title },
+                contentId = id,
                 contentType = if (isLive) "live" else contentType,
                 streamUrl = streamUrl,
                 artworkUrl = artworkUrl,
                 positionMs = posMs,
-                totalMs = player.duration.coerceAtLeast(0),
+                totalMs = totalMs,
                 lastUpdated = Instant.now(),
                 seriesTitle = seriesTitle,
                 seasonNumber = seasonNumber,
@@ -1072,32 +1177,44 @@ class PlayerViewModel @Inject constructor(
 
     /**
      * Full notification-emitting save — so the home rail refreshes.
+     * Finished titles are removed from Continue Watching instead of
+     * left sitting at ~100%.
      */
-    private fun saveFullContinueWatching() {
+    private fun saveFullContinueWatching(forceFinished: Boolean = false) {
         if (isLive) return
         val posMs = player.currentPosition
-        if (posMs < 5_000) return
+        // Allow forced finish even if position < 5s (rare STATE_ENDED edge).
+        if (!forceFinished && posMs < 5_000) return
         val totalMs = player.duration.coerceAtLeast(0)
+        val id = contentId.ifBlank { title }
+        val finished = isFinished(posMs, totalMs, forceFinished)
         viewModelScope.launch {
-            cwDao.upsert(
-                ContinueWatchingEntity(
-                    contentId = contentId.ifBlank { title },
-                    contentType = if (isLive) "live" else contentType,
-                    streamUrl = streamUrl,
-                    artworkUrl = artworkUrl,
-                    resumePositionMs = posMs,
-                    totalDurationMs = totalMs,
-                    lastUpdated = Instant.now(),
-                    seriesTitle = seriesTitle,
-                    seasonNumber = seasonNumber,
-                    episodeNumber = episodeNumber,
-                    title = title,
-                ),
-            )
+            if (finished) {
+                cwDao.delete(id)
+                // Prune any other finished rows left from older sessions.
+                runCatching { cwDao.deleteFinished() }
+            } else {
+                cwDao.upsert(
+                    ContinueWatchingEntity(
+                        contentId = id,
+                        contentType = if (isLive) "live" else contentType,
+                        streamUrl = streamUrl,
+                        artworkUrl = artworkUrl,
+                        resumePositionMs = posMs,
+                        totalDurationMs = totalMs,
+                        lastUpdated = Instant.now(),
+                        seriesTitle = seriesTitle,
+                        seasonNumber = seasonNumber,
+                        episodeNumber = episodeNumber,
+                        title = title,
+                    ),
+                )
+            }
             // Also persist progress on the episode row so the episode list
             // badges ("Resume" / "Watched") stay accurate.
             if (contentType == "show" && seriesTitle != null) {
-                val watched = totalMs > 0 && (totalMs - posMs) <= CREDITS_THRESHOLD_MS
+                val watched = finished ||
+                    (totalMs > 0 && (totalMs - posMs) <= CREDITS_THRESHOLD_MS)
                 val epContentId = episodeDao.findContentId(
                     seriesTitle!!, seasonNumber ?: 0, episodeNumber ?: 0,
                 )
@@ -1109,7 +1226,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     companion object {
-        /** If <= 3 minutes remain, treat the episode as finished. */
+        /** If <= 3 minutes remain, treat the title as finished. */
         const val CREDITS_THRESHOLD_MS = 180_000L
 
         /**
@@ -1180,6 +1297,8 @@ data class PlayerUiState(
      * playback; dismissed with Back or by selecting an episode.
      */
     val episodeOverlayVisible: Boolean = false,
+    /** Audio / subtitle picker overlay. */
+    val trackPanelVisible: Boolean = false,
     /**
      * Currently-playing season number — drives the highlight in the
      * episode-list overlay.  Mirrors the ViewModel's [seasonNumber]
@@ -1196,6 +1315,16 @@ data class SubtitleTrack(
     val groupIndex: Int,
     val trackIndex: Int,
     val label: String,
+    val language: String = "",
+    val isSelected: Boolean,
+)
+
+/** A single audio track available in the current stream. */
+data class AudioTrack(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val label: String,
+    val language: String = "",
     val isSelected: Boolean,
 )
 

@@ -184,6 +184,32 @@ data class MovieFilterRow(
     @ColumnInfo(name = "groupTitle") val groupTitle: String,
 )
 
+/** Provider category + visible row count for Movies / Shows rails. */
+data class CatalogueCategory(
+    @ColumnInfo(name = "groupTitle") val groupTitle: String,
+    @ColumnInfo(name = "count") val count: Int,
+)
+
+/**
+ * Lightweight series row for category rails / grids.  Omits plot / cast
+ * so large show catalogues stay under the CursorWindow limit.
+ */
+data class SeriesListItem(
+    val id: Int,
+    @ColumnInfo(name = "series_title") val seriesTitle: String,
+    @ColumnInfo(name = "poster_url") val posterUrl: String,
+    @ColumnInfo(name = "backdrop_url") val backdropUrl: String,
+    @ColumnInfo(name = "genre") val genre: String,
+    @ColumnInfo(name = "language") val language: String,
+    @ColumnInfo(name = "total_seasons") val totalSeasons: Int,
+    @ColumnInfo(name = "total_episodes") val totalEpisodes: Int,
+    @ColumnInfo(name = "last_seen_total_episodes") val lastSeenTotalEpisodes: Int,
+    @ColumnInfo(name = "hidden") val hidden: Boolean,
+) {
+    val hasNewEpisodes: Boolean
+        get() = totalEpisodes > 0 && totalEpisodes > lastSeenTotalEpisodes
+}
+
 // ---------------------------------------------------------------------------
 // Series — TV series header, joined to episodes by `series_title`.
 // ---------------------------------------------------------------------------

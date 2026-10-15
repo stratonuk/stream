@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Process
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,11 +22,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -36,6 +41,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.strata.tv.AppConfig
+import com.strata.tv.data.repo.SyncScope
 import com.strata.tv.data.repo.SyncService
 import com.strata.tv.data.settings.AppSettings
 import com.strata.tv.data.settings.ProviderConfig
@@ -44,6 +50,8 @@ import com.strata.tv.ui.theme.StrataColors
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /**
  * Settings screen.
@@ -71,28 +79,137 @@ fun SettingsScreen(
     val isSyncing = sync !is SyncService.Progress.Idle &&
         sync !is SyncService.Progress.Done &&
         sync !is SyncService.Progress.Error
+    val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val sectionOffsets = remember { mutableStateMapOf<String, Int>() }
+    val categories = remember {
+        listOf(
+            "Library",
+            "Sync",
+            "Diagnostics",
+            "Provider",
+            "Filters",
+            "My List",
+            "Playback",
+            "Backup",
+            "App",
+            "About",
+        )
+    }
+
+    fun jumpTo(section: String) {
+        val y = sectionOffsets[section] ?: return
+        scope.launch { scrollState.animateScrollTo(y.coerceAtLeast(0)) }
+    }
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .clipToBounds() // contains focus glow so it can't extend into sidebar
-            .verticalScroll(rememberScrollState())
-            // Extra left padding so the focused-state scale on TV
-            // surfaces has somewhere to breathe without overlapping
-            // the sidebar.
+            .clipToBounds()
             .padding(start = 48.dp, end = 48.dp, top = 24.dp, bottom = 24.dp),
     ) {
-        SectionHeader("Library")
-        Card {
-            ListRow(
-                headline = "${state.totalCount} items in library",
-                supporting = "${state.channelCount} channels  ${state.movieCount} movies  ${state.seriesCount} series",
-            )
+        Text(
+            text = "Settings",
+            color = StrataColors.TextPrimary,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(12.dp))
+
+        // Category jump bar — avoids endless D-pad scrolling.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            categories.forEach { name ->
+                Surface(
+                    onClick = { jumpTo(name) },
+                    shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(20.dp)),
+                    colors = ClickableSurfaceDefaults.colors(
+                        containerColor = StrataColors.SurfaceRaised,
+                        focusedContainerColor = StrataColors.AccentPrimary,
+                        focusedContentColor = StrataColors.SurfaceVoid,
+                        contentColor = StrataColors.TextSecondary,
+                    ),
+                ) {
+                    Text(
+                        text = name,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    )
+                }
+            }
         }
 
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(16.dp))
 
-        SectionHeader("Sync diagnostics")
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(scrollState),
+        ) {
+        SettingsSection("Library", sectionOffsets) {
+            Card {
+                ListRow(
+                    headline = "${state.totalCount} items in library",
+                    supporting = "${state.channelCount} channels  ${state.movieCount} movies  ${state.seriesCount} series",
+                )
+            }
+        }
+
+        SettingsSection("Sync", sectionOffsets) {
+        Card {
+            Column {
+                val freq = settings.syncFrequency
+                SyncFrequency.entries.forEach { option ->
+                    ListRow(
+                        headline = option.displayName(),
+                        supporting = option.description(),
+                        selected = option == freq,
+                        onClick = { viewModel.setSyncFrequency(option) },
+                    )
+                }
+                ListRow(
+                    headline = if (isSyncing) "Syncing…" else "Sync everything",
+                    supporting = when (sync) {
+                        is SyncService.Progress.Downloading -> "Downloading…"
+                        is SyncService.Progress.Parsing ->
+                            "Parsing… ${(sync as SyncService.Progress.Parsing).parsed} entries"
+                        SyncService.Progress.PostProcessing -> "Writing to library…"
+                        is SyncService.Progress.Error ->
+                            "Failed: ${(sync as SyncService.Progress.Error).message}"
+                        is SyncService.Progress.Done ->
+                            "Done, ${(sync as SyncService.Progress.Done).totalParsed} items"
+                        SyncService.Progress.Idle ->
+                            "Live → Movies → Shows one after another (safer on Fire Stick)"
+                    },
+                    accent = !isSyncing,
+                    onClick = { if (!isSyncing) viewModel.refreshLibrary(SyncScope.All) },
+                )
+                ListRow(
+                    headline = "Sync Live TV only",
+                    supporting = "Download channels without movies or series",
+                    onClick = { if (!isSyncing) viewModel.refreshLibrary(SyncScope.Live) },
+                )
+                ListRow(
+                    headline = "Sync Movies only",
+                    supporting = "Download VOD catalogue separately (avoids crash on huge lists)",
+                    onClick = { if (!isSyncing) viewModel.refreshLibrary(SyncScope.Movies) },
+                )
+                ListRow(
+                    headline = "Sync TV Shows only",
+                    supporting = "Download series catalogue separately",
+                    onClick = { if (!isSyncing) viewModel.refreshLibrary(SyncScope.Shows) },
+                )
+            }
+        }
+        }
+
+        SettingsSection("Diagnostics", sectionOffsets) {
         Card {
             Column {
                 val whenSynced = diagnostics.lastSyncAt?.let { at ->
@@ -142,10 +259,9 @@ fun SettingsScreen(
                 )
             }
         }
+        }
 
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("Provider")
+        SettingsSection("Provider", sectionOffsets) {
         Card {
             Column {
                 ListRow(
@@ -187,39 +303,9 @@ fun SettingsScreen(
                 )
             }
         }
-
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("Sync")
-        Card {
-            Column {
-                val freq = settings.syncFrequency
-                SyncFrequency.entries.forEach { option ->
-                    ListRow(
-                        headline = option.displayName(),
-                        supporting = option.description(),
-                        selected = option == freq,
-                        onClick = { viewModel.setSyncFrequency(option) },
-                    )
-                }
-                ListRow(
-                    headline = if (isSyncing) "Syncing..." else "Refresh library now",
-                    supporting = when (sync) {
-                        is SyncService.Progress.Downloading -> "Downloading playlist..."
-                        is SyncService.Progress.Parsing -> "Parsing... ${(sync as SyncService.Progress.Parsing).parsed} entries"
-                        SyncService.Progress.PostProcessing -> "Writing to library..."
-                        is SyncService.Progress.Error -> "Failed: ${(sync as SyncService.Progress.Error).message}"
-                        is SyncService.Progress.Done -> "Done, ${(sync as SyncService.Progress.Done).totalParsed} items"
-                        SyncService.Progress.Idle -> "Re-download and parse the M3U playlist"
-                    },
-                    accent = !isSyncing,
-                    onClick = { if (!isSyncing) viewModel.refreshLibrary() },
-                )
-            }
         }
 
-        Spacer(Modifier.height(20.dp))
-
+        SettingsSection("Filters", sectionOffsets) {
         // Region whitelist (countries).
         FilterSection(
             title = "Region",
@@ -240,11 +326,6 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(20.dp))
 
-        // Excluded categories.  Default is XXX/Adult/Religious.
-        // We show the defaults plus anything the user has manually
-        // added — so they can untick and they can't currently add
-        // arbitrary new keywords from this screen.  Custom keywords
-        // can be added via a future "Add..." chip.
         val excludedItems: List<Pair<String, String>> = remember(settings.excludedCategories) {
             (AppSettings.DEFAULT_EXCLUDED_CATEGORIES + settings.excludedCategories)
                 .map { it to it }
@@ -269,7 +350,6 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(20.dp))
 
-        // Wanted languages (whitelist for movies + series).
         FilterSection(
             title = "Languages",
             description = "Only enrich and surface movies + series in these languages.",
@@ -299,8 +379,6 @@ fun SettingsScreen(
                         else -> "Currently ${settings.minimumYear} and newer"
                     },
                 )
-                // Show each option as its own list row so a D-pad press
-                // immediately swaps the value (no dropdown overlay).
                 AppSettings.MINIMUM_YEAR_OPTIONS.forEach { year ->
                     val label = if (year == 0) "No minimum" else year.toString()
                     ListRow(
@@ -311,15 +389,14 @@ fun SettingsScreen(
                 }
             }
         }
+        }
 
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("My List")
+        SettingsSection("My List", sectionOffsets) {
         Card {
             Column {
                 ListRow(
                     headline = "Clear watch history",
-                    supporting = "Remove everything from watch history on this device",
+                    supporting = "Clear Continue watching on Home and the watch history list",
                     onClick = { viewModel.clearWatchHistory() },
                 )
                 ListRow(
@@ -336,10 +413,9 @@ fun SettingsScreen(
                 }
             }
         }
+        }
 
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("Playback")
+        SettingsSection("Playback", sectionOffsets) {
         Card {
             ListRow(
                 headline = "Stop stream when browsing menus",
@@ -349,10 +425,9 @@ fun SettingsScreen(
                 accent = settings.stopStreamInMenus,
             )
         }
+        }
 
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("Backup & restore")
+        SettingsSection("Backup", sectionOffsets) {
         Card {
             Column {
                 ListRow(
@@ -375,10 +450,9 @@ fun SettingsScreen(
                 }
             }
         }
+        }
 
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("App")
+        SettingsSection("App", sectionOffsets) {
         Card {
             Column {
                 ListRow(
@@ -408,16 +482,13 @@ fun SettingsScreen(
                 )
             }
         }
+        }
 
-        Spacer(Modifier.height(20.dp))
-
-        SectionHeader("About")
+        SettingsSection("About", sectionOffsets) {
         Card {
             Column {
                 ListRow(
                     headline = "STREAM",
-                    // Read straight from BuildConfig so this stays in
-                    // sync with build.gradle.kts versionName forever.
                     supporting = "v${com.strata.tv.BuildConfig.VERSION_NAME} (${com.strata.tv.BuildConfig.VERSION_CODE})",
                 )
                 ListRow(
@@ -427,8 +498,29 @@ fun SettingsScreen(
                 )
             }
         }
+        }
 
         Spacer(Modifier.height(24.dp))
+        } // end scroll column
+    }
+}
+
+@Composable
+private fun SettingsSection(
+    name: String,
+    offsets: MutableMap<String, Int>,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { coords ->
+                offsets[name] = coords.positionInParent().y.roundToInt()
+            },
+    ) {
+        SectionHeader(name)
+        content()
+        Spacer(Modifier.height(20.dp))
     }
 }
 

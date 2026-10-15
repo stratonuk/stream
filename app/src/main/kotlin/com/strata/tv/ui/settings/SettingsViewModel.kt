@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.strata.tv.data.backup.BackupRepository
 import com.strata.tv.data.backup.BackupResult
 import com.strata.tv.data.db.ChannelDao
+import com.strata.tv.data.db.ContinueWatchingDao
 import com.strata.tv.data.db.MovieDao
 import com.strata.tv.data.db.SeriesDao
 import com.strata.tv.data.db.WatchHistoryDao
@@ -13,6 +14,7 @@ import com.strata.tv.data.repo.BootstrapRepository
 import com.strata.tv.data.repo.LibraryFilterRepository
 import com.strata.tv.data.repo.SyncDiagnostics
 import com.strata.tv.data.repo.SyncDiagnosticsStore
+import com.strata.tv.data.repo.SyncScope
 import com.strata.tv.data.repo.SyncService
 import com.strata.tv.data.settings.AppSettings
 import com.strata.tv.data.settings.ProviderConfig
@@ -48,6 +50,7 @@ class SettingsViewModel @Inject constructor(
     private val diagnosticsStore: SyncDiagnosticsStore,
     private val watchHistoryDao: WatchHistoryDao,
     private val watchlistDao: WatchlistDao,
+    private val continueWatchingDao: ContinueWatchingDao,
 ) : ViewModel() {
 
     val syncDiagnostics: StateFlow<SyncDiagnostics> = diagnosticsStore.snapshot
@@ -112,20 +115,18 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun refreshLibrary() {
+    fun refreshLibrary(scope: SyncScope = SyncScope.All) {
         viewModelScope.launch {
             val cfg = settings.value.provider
             if (!cfg.isConfigured) return@launch
             val sourceId = bootstrap.ensureSource()
-            // SyncService internally surfaces failures via its own
-            // Progress.Error state — the UI subscribes to that and
-            // renders an error banner.  We still log here as well so
-            // any failure shows up in adb logcat for diagnosis (#47).
             runCatching {
-                syncService.syncFromUrl(cfg.toM3uUrl(), sourceId)
-                settingsRepo.setLastSyncEpochDay(Instant.now().epochSecond / 86_400)
+                syncService.syncFromUrl(cfg.toM3uUrl(), sourceId, scope)
+                if (scope == SyncScope.All) {
+                    settingsRepo.setLastSyncEpochDay(Instant.now().epochSecond / 86_400)
+                }
             }.onFailure { e ->
-                android.util.Log.e("SettingsVM", "refreshLibrary failed", e)
+                android.util.Log.e("SettingsVM", "refreshLibrary(${scope.name}) failed", e)
             }
         }
     }
@@ -229,7 +230,12 @@ class SettingsViewModel @Inject constructor(
 
     fun clearWatchHistory() {
         viewModelScope.launch {
-            runCatching { watchHistoryDao.clearAll() }
+            // Home's "Continue watching" rail reads continue_watching,
+            // not watch_history — clear both so the homepage updates.
+            runCatching {
+                watchHistoryDao.clearAll()
+                continueWatchingDao.clearAll()
+            }
                 .onSuccess { _libraryActionMessage.value = "Watch history cleared" }
                 .onFailure {
                     _libraryActionMessage.value = "Could not clear watch history"
