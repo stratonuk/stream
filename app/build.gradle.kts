@@ -49,8 +49,8 @@ android {
         targetSdk = 34
         // Increment versionCode on EVERY release so Android accepts
         // the update without uninstall. versionName is display-only.
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.4"
 
         // Custom JUnit runner that swaps the Application class for
         // [HiltTestApplication] so @AndroidEntryPoint / @HiltViewModel

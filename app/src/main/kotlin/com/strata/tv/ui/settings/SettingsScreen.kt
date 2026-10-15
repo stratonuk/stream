@@ -64,6 +64,7 @@ fun SettingsScreen(
     val sync by viewModel.syncProgress.collectAsState()
     val accountInfo by viewModel.accountInfo.collectAsState()
     val backupMessage by viewModel.backupMessage.collectAsState()
+    val libraryActionMessage by viewModel.libraryActionMessage.collectAsState()
     val diagnostics by viewModel.syncDiagnostics.collectAsState()
     val context = LocalContext.current
     val activity = context as? Activity
@@ -306,6 +307,31 @@ fun SettingsScreen(
                         headline = label,
                         selected = year == settings.minimumYear,
                         onClick = { viewModel.setMinimumYear(year) },
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        SectionHeader("My List")
+        Card {
+            Column {
+                ListRow(
+                    headline = "Clear watch history",
+                    supporting = "Remove everything from watch history on this device",
+                    onClick = { viewModel.clearWatchHistory() },
+                )
+                ListRow(
+                    headline = "Remove from watchlist",
+                    supporting = "Clear every title saved to My List / watchlist",
+                    onClick = { viewModel.clearWatchlist() },
+                )
+                if (!libraryActionMessage.isNullOrBlank()) {
+                    ListRow(
+                        headline = "Status",
+                        supporting = libraryActionMessage!!,
+                        onClick = { viewModel.clearLibraryActionMessage() },
                     )
                 }
             }

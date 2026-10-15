@@ -7,6 +7,8 @@ import com.strata.tv.data.backup.BackupResult
 import com.strata.tv.data.db.ChannelDao
 import com.strata.tv.data.db.MovieDao
 import com.strata.tv.data.db.SeriesDao
+import com.strata.tv.data.db.WatchHistoryDao
+import com.strata.tv.data.db.WatchlistDao
 import com.strata.tv.data.repo.BootstrapRepository
 import com.strata.tv.data.repo.LibraryFilterRepository
 import com.strata.tv.data.repo.SyncDiagnostics
@@ -44,6 +46,8 @@ class SettingsViewModel @Inject constructor(
     private val seriesEnrichment: SeriesEnrichmentService,
     private val backupRepository: BackupRepository,
     private val diagnosticsStore: SyncDiagnosticsStore,
+    private val watchHistoryDao: WatchHistoryDao,
+    private val watchlistDao: WatchlistDao,
 ) : ViewModel() {
 
     val syncDiagnostics: StateFlow<SyncDiagnostics> = diagnosticsStore.snapshot
@@ -213,6 +217,35 @@ class SettingsViewModel @Inject constructor(
                 }
                 is BackupResult.Failure -> _backupMessage.value = "Restore failed: ${result.message}"
             }
+        }
+    }
+
+    private val _libraryActionMessage = MutableStateFlow<String?>(null)
+    val libraryActionMessage: StateFlow<String?> = _libraryActionMessage.asStateFlow()
+
+    fun clearLibraryActionMessage() {
+        _libraryActionMessage.value = null
+    }
+
+    fun clearWatchHistory() {
+        viewModelScope.launch {
+            runCatching { watchHistoryDao.clearAll() }
+                .onSuccess { _libraryActionMessage.value = "Watch history cleared" }
+                .onFailure {
+                    _libraryActionMessage.value = "Could not clear watch history"
+                    android.util.Log.e("SettingsVM", "clearWatchHistory failed", it)
+                }
+        }
+    }
+
+    fun clearWatchlist() {
+        viewModelScope.launch {
+            runCatching { watchlistDao.clearAll() }
+                .onSuccess { _libraryActionMessage.value = "Watchlist cleared" }
+                .onFailure {
+                    _libraryActionMessage.value = "Could not clear watchlist"
+                    android.util.Log.e("SettingsVM", "clearWatchlist failed", it)
+                }
         }
     }
 

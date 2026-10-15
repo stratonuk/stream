@@ -187,9 +187,8 @@ interface MovieDao {
     /**
      * Lightweight projection for grid/rail list views.  Omits heavy text
      * columns (overview, cast) that cause CursorWindow overflow.
-     * Capped at 500 rows — more than enough for genre rails + hero;
-     * even 15-column rows overflow the 2 MB CursorWindow at ~3000 rows
-     * due to long poster URLs and titles.
+     * Cap matches large Xtream VOD catalogues (~300k). Room may still
+     * chunk large cursors; keep the projection lean for that reason.
      */
     @Query(
         """
@@ -199,7 +198,7 @@ interface MovieDao {
         FROM movies WHERE hidden = 0
           AND (year IS NULL OR year BETWEEN 1900 AND 2030)
         ORDER BY year DESC
-        LIMIT 20000
+        LIMIT 300000
         """,
     )
     fun watchAllForList(): Flow<List<MovieListItem>>
@@ -1102,6 +1101,9 @@ interface WatchHistoryDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(entries: List<WatchHistoryEntity>)
+
+    @Query("DELETE FROM watch_history")
+    suspend fun clearAll()
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,6 +1152,9 @@ interface WatchlistDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM watchlist WHERE content_id = :contentId)")
     fun watchIsInWatchlist(contentId: String): Flow<Boolean>
+
+    @Query("DELETE FROM watchlist")
+    suspend fun clearAll()
 }
 
 // ---------------------------------------------------------------------------
