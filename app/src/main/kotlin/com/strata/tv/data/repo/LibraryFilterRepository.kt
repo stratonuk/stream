@@ -3,8 +3,8 @@ package com.strata.tv.data.repo
 import android.util.Log
 import com.strata.tv.data.db.MovieDao
 import com.strata.tv.data.db.SeriesDao
-import com.strata.tv.data.settings.AppSettings
 import com.strata.tv.data.settings.SettingsRepository
+import com.strata.tv.domain.CategoryRegion
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -98,11 +98,18 @@ class LibraryFilterRepository @Inject constructor(
         val excludedLangs = s.excludedLanguages
         val excludedGenres = s.excludedGenres
         val minYear = s.minimumYear
-        val countryWhitelist = s.countryWhitelist.map { it.uppercase() }.toSet()
+        val countryWhitelist = s.countryWhitelist
+        val excludedCategories = s.excludedCategories
 
-        // Filter-derived hide decision (language / genre / year).  The
-        // caller ORs in the sticky `user_hidden` flag so a manual "Ignore
-        // this film" is never un-hidden by a filter relax.
+        // Presentation-only: never deletes rows. EN| packs stay visible
+        // when UK/GB is selected via CategoryRegion affinity.
+        fun regionOrCategoryHidden(groupTitle: String): Boolean {
+            if (CategoryRegion.matchesExcludedCategory(groupTitle, excludedCategories)) {
+                return true
+            }
+            return !CategoryRegion.matchesRegion(groupTitle, countryWhitelist)
+        }
+
         fun shouldHideByFilters(language: String, genre: String, year: Int?): Boolean {
             val langWanted = wanted.isEmpty() || language in wanted
             val langExcluded = language in excludedLangs
@@ -115,58 +122,34 @@ class LibraryFilterRepository @Inject constructor(
 
         var flipped = 0
 
-        // Movies — load full entities so we can read year/language/genre.
-        // Loaded all-at-once because Room's allIncludingHidden() is a
-        // single SELECT and we apply hide/show in a couple of IN-list
-        // updates afterwards.  For very large libraries this still
-        // means a transient MovieEntity list of 50k+ rows in memory;
-        // worst case ~30 MB which the heap can take post-sync.
         val allMovies = movieDao.allForFilterRecompute()
         val movieToHide = mutableListOf<Int>()
         val movieToShow = mutableListOf<Int>()
         for (m in allMovies) {
-            // Instant filters work even on UNENRICHED movies, using the
-            // provider data we have at sync: the year (parsed from the
-            // title) and the category (group_title).  We do NOT hide an
-            // un-TMDB'd movie just for lacking a match — it shows with its
-            // provider poster, and TMDB later supplies the language to
-            // catch foreign ones.  shouldHideByFilters also covers year for
-            // enriched rows; we add the year check explicitly for the
-            // unenriched branch.
-            val foreignExcluded = com.strata.tv.domain.ForeignContentFilter
-                .shouldExclude(m.groupTitle, countryWhitelist)
+            val regionHidden = regionOrCategoryHidden(m.groupTitle)
             val tooOld = minYear > 0 && m.year != null && m.year < minYear
             val should = if (m.tmdbId == 0) {
-                tooOld || foreignExcluded || m.userHidden
+                tooOld || regionHidden || m.userHidden
             } else {
                 shouldHideByFilters(m.language, m.genre, m.year) ||
-                    m.userHidden || foreignExcluded
+                    m.userHidden || regionHidden
             }
             if (should && !m.hidden) movieToHide += m.id
             else if (!should && m.hidden) movieToShow += m.id
         }
-        // Chunk the IN-list updates — SQLite's parameter limit is 999
-        // by default, and very large IN-lists also spike query plan
-        // memory.  500 ids per chunk is safely below both limits.
         for (chunk in movieToHide.chunked(500)) movieDao.hideByIds(chunk).also { flipped += chunk.size }
         for (chunk in movieToShow.chunked(500)) movieDao.showByIds(chunk).also { flipped += chunk.size }
 
-        // Series — same logic on first_air_year + language + genre.
         val allSeries = seriesDao.allIncludingHidden()
         val seriesToHide = mutableListOf<Int>()
         val seriesToShow = mutableListOf<Int>()
         for (s2 in allSeries) {
-            // Instant filters on unenriched series: foreign-category +
-            // manual ignore (series have no title-parsed year).  Not
-            // hidden just for lacking a TMDB match — TMDB supplies the
-            // language in the background.
-            val foreignExcluded = com.strata.tv.domain.ForeignContentFilter
-                .shouldExclude(s2.groupTitle, countryWhitelist)
+            val regionHidden = regionOrCategoryHidden(s2.groupTitle)
             val should = if (s2.tmdbId == 0) {
-                foreignExcluded || s2.userHidden
+                regionHidden || s2.userHidden
             } else {
                 shouldHideByFilters(s2.language, s2.genre, s2.firstAirYear) ||
-                    s2.userHidden || foreignExcluded
+                    s2.userHidden || regionHidden
             }
             if (should && !s2.hidden) seriesToHide += s2.id
             else if (!should && s2.hidden) seriesToShow += s2.id
@@ -178,8 +161,8 @@ class LibraryFilterRepository @Inject constructor(
             TAG,
             "Recompute filters: ${movieToHide.size}/${movieToShow.size} movies hide/show, " +
                 "${seriesToHide.size}/${seriesToShow.size} series hide/show. " +
-                "Settings: wanted=$wanted, excludedLangs=$excludedLangs, " +
-                "excludedGenres=$excludedGenres, minYear=$minYear",
+                "Settings: region=$countryWhitelist wanted=$wanted " +
+                "excludedCats=${excludedCategories.size} minYear=$minYear",
         )
         return flipped
     }

@@ -77,46 +77,53 @@ class XtreamJsonClient @Inject constructor(
         val base = host.trimEnd('/')
 
         onProgress("Loading categories")
-        val liveCats = fetchAction<XtreamCategory>(base, user, pass, "get_live_categories", userAgent)
-            .associate { it.id to it.name }
-        val vodCats = fetchAction<XtreamCategory>(base, user, pass, "get_vod_categories", userAgent)
-            .associate { it.id to it.name }
-        val seriesCats = fetchAction<XtreamCategory>(base, user, pass, "get_series_categories", userAgent)
-            .associate { it.id to it.name }
-        Log.d(
+        val liveCatList = fetchAction<XtreamCategory>(base, user, pass, "get_live_categories", userAgent)
+        val vodCatList = fetchAction<XtreamCategory>(base, user, pass, "get_vod_categories", userAgent)
+        val seriesCatList = fetchAction<XtreamCategory>(base, user, pass, "get_series_categories", userAgent)
+        val liveCats = liveCatList.associate { it.id to it.name }
+        val vodCats = vodCatList.associate { it.id to it.name }
+        val seriesCats = seriesCatList.associate { it.id to it.name }
+        // Counts only — never log host / credentials.
+        Log.i(
             TAG,
-            "Categories: ${liveCats.size} live, ${vodCats.size} VOD, ${seriesCats.size} series",
+            "Xtream categories: live=${liveCats.size} vod=${vodCats.size} series=${seriesCats.size}",
         )
 
         onProgress("Loading live channels")
         val liveDtos = fetchAction<XtreamLiveStream>(base, user, pass, "get_live_streams", userAgent)
-        Log.d(TAG, "Fetched ${liveDtos.size} live streams")
         val liveEntries = liveDtos.mapNotNull { it.toEntry(base, user, pass, liveCats) }
+        Log.i(TAG, "Xtream live: provider=${liveDtos.size} parsed=${liveEntries.size}")
 
         onProgress("Loading movies")
         val vodDtos = fetchAction<XtreamVodStream>(base, user, pass, "get_vod_streams", userAgent)
-        Log.d(TAG, "Fetched ${vodDtos.size} VOD streams")
         val movieEntries = vodDtos.mapNotNull { it.toEntry(base, user, pass, vodCats) }
+        Log.i(TAG, "Xtream movies: provider=${vodDtos.size} parsed=${movieEntries.size}")
 
-        onProgress("Loading box sets")
-        val seriesDtos = fetchAction<XtreamSeries>(base, user, pass, "get_series", userAgent)
-            // Some providers send duplicate entries for the same
-            // series_id (different sources / qualities) — keep one each
-            // so we don't double-write the series table.
+        onProgress("Loading series")
+        val seriesDtosRaw = fetchAction<XtreamSeries>(base, user, pass, "get_series", userAgent)
+        // Drop malformed rows (series_id 0) then collapse duplicates.
+        val seriesDtos = seriesDtosRaw
+            .filter { it.seriesId > 0 && it.name.isNotBlank() }
             .distinctBy { it.seriesId }
-        Log.d(TAG, "Fetched ${seriesDtos.size} unique series")
-
-        // Episodes are no longer fetched up-front.  Hammering
-        // get_series_info with 4000+ requests trips most providers'
-        // rate limits (MyBunny.TV serves HTTP 429 above ~2 concurrent).
-        // The series detail screen lazy-loads episodes when the user
-        // opens a series, using [fetchEpisodesForSeries] below.
         val seriesEntries = seriesDtos.map { it.toSeriesEntry(seriesCats) }
+        Log.i(
+            TAG,
+            "Xtream series: provider=${seriesDtosRaw.size} unique=${seriesDtos.size} parsed=${seriesEntries.size}",
+        )
+
+        // Episodes are lazy-loaded on detail open via get_series_info
+        // (bulk fetch trips provider rate limits).
 
         XtreamSnapshot(
             live = liveEntries,
             movies = movieEntries,
             seriesMeta = seriesEntries,
+            liveCategories = liveCats.size,
+            vodCategories = vodCats.size,
+            seriesCategories = seriesCats.size,
+            liveProviderCount = liveDtos.size,
+            moviesProviderCount = vodDtos.size,
+            seriesProviderCount = seriesDtosRaw.size,
         )
     }
 
@@ -294,6 +301,12 @@ data class XtreamSnapshot(
     val live: List<M3uEntry>,
     val movies: List<M3uEntry>,
     val seriesMeta: List<XtreamSeriesMeta>,
+    val liveCategories: Int = 0,
+    val vodCategories: Int = 0,
+    val seriesCategories: Int = 0,
+    val liveProviderCount: Int = 0,
+    val moviesProviderCount: Int = 0,
+    val seriesProviderCount: Int = 0,
 )
 
 // ----------------------------------------------------------------------
@@ -393,13 +406,16 @@ internal data class XtreamVodStream(
 
 @Serializable
 internal data class XtreamSeries(
-    @SerialName("series_id") val seriesId: Int = 0,
+    @SerialName("series_id") private val seriesIdRaw: JsonElement? = null,
     @SerialName("name") val name: String = "",
     @SerialName("cover") val cover: String? = null,
-    @SerialName("category_id") val categoryId: String? = null,
+    @SerialName("category_id") private val categoryIdRaw: JsonElement? = null,
 ) {
+    val seriesId: Int
+        get() = seriesIdRaw.asScalarString().toIntOrNull() ?: 0
+
     fun toSeriesEntry(categoryNames: Map<String, String>): XtreamSeriesMeta {
-        val categoryName = categoryId?.let { categoryNames[it] }.orEmpty()
+        val categoryName = categoryIdRaw.asScalarString().let { categoryNames[it] }.orEmpty()
         return XtreamSeriesMeta(
             xtreamSeriesId = seriesId,
             title = TitleParser.stripHdPrefix(name),

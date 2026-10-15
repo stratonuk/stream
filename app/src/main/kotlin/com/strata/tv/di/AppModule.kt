@@ -95,8 +95,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideHttpClient(): OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS) // EPG XMLTV bodies can be ~150 MB.
+        .connectTimeout(15, TimeUnit.SECONDS)
+        // Large Xtream get_vod_streams / get_series JSON + XMLTV EPG.
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
     @Provides

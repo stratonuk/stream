@@ -9,6 +9,8 @@ import com.strata.tv.data.db.MovieDao
 import com.strata.tv.data.db.SeriesDao
 import com.strata.tv.data.repo.BootstrapRepository
 import com.strata.tv.data.repo.LibraryFilterRepository
+import com.strata.tv.data.repo.SyncDiagnostics
+import com.strata.tv.data.repo.SyncDiagnosticsStore
 import com.strata.tv.data.repo.SyncService
 import com.strata.tv.data.settings.AppSettings
 import com.strata.tv.data.settings.ProviderConfig
@@ -41,7 +43,10 @@ class SettingsViewModel @Inject constructor(
     private val movieEnrichment: MovieEnrichmentService,
     private val seriesEnrichment: SeriesEnrichmentService,
     private val backupRepository: BackupRepository,
+    private val diagnosticsStore: SyncDiagnosticsStore,
 ) : ViewModel() {
+
+    val syncDiagnostics: StateFlow<SyncDiagnostics> = diagnosticsStore.snapshot
 
     /**
      * Re-evaluate the `hidden` flag against the current settings

@@ -64,6 +64,7 @@ fun SettingsScreen(
     val sync by viewModel.syncProgress.collectAsState()
     val accountInfo by viewModel.accountInfo.collectAsState()
     val backupMessage by viewModel.backupMessage.collectAsState()
+    val diagnostics by viewModel.syncDiagnostics.collectAsState()
     val context = LocalContext.current
     val activity = context as? Activity
     val isSyncing = sync !is SyncService.Progress.Idle &&
@@ -86,6 +87,59 @@ fun SettingsScreen(
                 headline = "${state.totalCount} items in library",
                 supporting = "${state.channelCount} channels  ${state.movieCount} movies  ${state.seriesCount} series",
             )
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        SectionHeader("Sync diagnostics")
+        Card {
+            Column {
+                val whenSynced = diagnostics.lastSyncAt?.let { at ->
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                        .withZone(ZoneId.systemDefault())
+                        .format(at)
+                } ?: "Never"
+                ListRow(
+                    headline = "Last successful sync",
+                    supporting = whenSynced +
+                        if (diagnostics.syncPath.isNotBlank()) " · ${diagnostics.syncPath}" else "",
+                )
+                if (!diagnostics.lastError.isNullOrBlank()) {
+                    ListRow(
+                        headline = "Last sync error",
+                        supporting = diagnostics.lastError!!,
+                    )
+                }
+                ListRow(
+                    headline = "Categories",
+                    supporting = "Total ${diagnostics.totalCategories}  " +
+                        "live ${diagnostics.liveCategories}  " +
+                        "VOD ${diagnostics.vodCategories}  " +
+                        "series ${diagnostics.seriesCategories}  " +
+                        "excluded keywords ${diagnostics.hiddenCategoriesEstimate}",
+                )
+                ListRow(
+                    headline = "Live TV",
+                    supporting = "Provider ${diagnostics.liveProvider} · " +
+                        "Parsed ${diagnostics.liveParsed} · " +
+                        "Stored ${diagnostics.liveStored} · " +
+                        "Visible ${diagnostics.liveVisible}",
+                )
+                ListRow(
+                    headline = "Movies",
+                    supporting = "Provider ${diagnostics.moviesProvider} · " +
+                        "Parsed ${diagnostics.moviesParsed} · " +
+                        "Stored ${diagnostics.moviesStored} · " +
+                        "Visible ${diagnostics.moviesVisible}",
+                )
+                ListRow(
+                    headline = "Series",
+                    supporting = "Provider ${diagnostics.seriesProvider} · " +
+                        "Parsed ${diagnostics.seriesParsed} · " +
+                        "Stored ${diagnostics.seriesStored} · " +
+                        "Visible ${diagnostics.seriesVisible}",
+                )
+            }
         }
 
         Spacer(Modifier.height(20.dp))
@@ -168,7 +222,7 @@ fun SettingsScreen(
         // Region whitelist (countries).
         FilterSection(
             title = "Region",
-            description = "Only show channels from these regions. Empty means everywhere.",
+            description = "Show content from these regions. UK also includes EN-labelled English packs. Empty means everywhere. Catalogue stays stored — this only changes what is visible.",
             items = AppSettings.KNOWN_COUNTRIES,
             selected = settings.countryWhitelist,
             onToggle = { code ->

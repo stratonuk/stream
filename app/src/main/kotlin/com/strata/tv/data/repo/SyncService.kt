@@ -18,11 +18,11 @@ import com.strata.tv.data.m3u.ParseResult
 import com.strata.tv.data.settings.SettingsRepository
 import com.strata.tv.data.xtream.XtreamJsonClient
 import com.strata.tv.data.xtream.XtreamSnapshot
+import com.strata.tv.domain.CategoryRegion
 import com.strata.tv.domain.ChannelCategorizer
 import com.strata.tv.domain.ChannelDeduplicator
 import com.strata.tv.domain.ContentIdHasher
 import com.strata.tv.domain.ContentType
-import com.strata.tv.domain.ForeignContentFilter
 import com.strata.tv.domain.MovieDeduplicator
 import com.strata.tv.domain.SkyChannelNumbers
 import com.strata.tv.domain.TitleParser
@@ -32,10 +32,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -69,6 +71,7 @@ class SyncService @Inject constructor(
     private val settingsRepo: SettingsRepository,
     private val xtreamJson: XtreamJsonClient,
     private val libraryFilter: LibraryFilterRepository,
+    private val diagnosticsStore: SyncDiagnosticsStore,
 ) {
 
     sealed interface Progress {
@@ -129,113 +132,131 @@ class SyncService @Inject constructor(
         try {
             _progress.value = Progress.Downloading(0)
 
-            // Snapshot filter settings once so the rules stay consistent
-            // for the whole sync run.
+            // Region / language / adult filters are presentation-only.
+            // Sync always stores the complete catalogue so toggling
+            // Settings never requires a re-download to recover EN| packs.
             val settings = settingsRepo.current()
-            val excludedCategories = settings.excludedCategories
-                .map { it.lowercase() }
-                .toSet()
-            val countryWhitelist = settings.countryWhitelist
-                .map { it.uppercase() }
-                .toSet()
-
-            fun isExcluded(entry: M3uEntry): Boolean {
-                val group = entry.groupTitle
-                // Country filter: extract prefix before the first "|" and
-                // require it to be in the whitelist.  Empty whitelist
-                // means "accept everything".
-                if (countryWhitelist.isNotEmpty() && group.contains('|')) {
-                    val prefix = group.substringBefore('|').trim().uppercase()
-                    if (prefix.isNotEmpty() && prefix !in countryWhitelist) {
-                        return true
-                    }
-                }
-                // Foreign-language category filter: catches categories that
-                // name a non-whitelisted country/language WITHOUT a "|"
-                // prefix (e.g. "German", "Hindi", "Thai") — the common
-                // Xtream convention the prefix check above misses.
-                if (ForeignContentFilter.shouldExclude(group, countryWhitelist)) {
-                    return true
-                }
-                // Category filter: drop anything whose group-title matches
-                // a blacklisted keyword (substring match, case-insensitive).
-                if (excludedCategories.isNotEmpty()) {
-                    val g = group.lowercase()
-                    if (excludedCategories.any { needle -> g.contains(needle) }) {
-                        return true
-                    }
-                }
-                return false
-            }
-
-            // Live channels stay buffered for cross-batch dedup (typically
-            // a few thousand entries).  Movies + episodes are stream-
-            // persisted during parse — see the parser collector below.
-            // For the JSON fallback (`useJsonApi == true`) we still buffer
-            // movies + episodes since the XtreamSnapshot is in-memory anyway.
+            val provider = settings.provider
             val live = mutableListOf<M3uEntry>()
             val movies = mutableListOf<M3uEntry>()
             val episodes = mutableListOf<M3uEntry>()
+            var seriesMetaToPersist: List<com.strata.tv.data.xtream.XtreamSeriesMeta> = emptyList()
+            var syncPath = "m3u"
+            var diagLiveCats = 0
+            var diagVodCats = 0
+            var diagSeriesCats = 0
+            var diagLiveProvider = 0
+            var diagMoviesProvider = 0
+            var diagSeriesProvider = 0
+            var m3uParsedTotal = 0
 
-            // Try the M3U URL first, but peek the response body to
-            // detect JSON-only Xtream providers (e.g. MyBunny.TV).
-            // Their `get.php` returns a 354-byte JSON auth blob instead
-            // of an M3U playlist, so the existing line-based parser
-            // would parse zero entries and the user would never see
-            // any content.  When we detect that, fall back to the
-            // Xtream Codes JSON API (`player_api.php`) which is the
-            // universal Xtream interface.
-            val provider = settings.provider
-            val useJsonApi = withContext(Dispatchers.IO) {
-                fetchPlaylistWithRetry(playlistUrl, provider.apiUserAgent())
-                    .use { response ->
-                        if (!response.isSuccessful) {
-                            error("HTTP ${response.code} fetching $playlistUrl")
-                        }
-                        val body = response.body ?: error("Empty playlist body")
-                        val contentType = response.header("Content-Type").orEmpty()
+            val isXtream = provider.providerId != "custom_m3u" &&
+                provider.host.isNotBlank() &&
+                provider.username.isNotBlank() &&
+                provider.password.isNotBlank()
 
-                        // Cheap peek: read up to ~512 bytes to detect
-                        // whether the body looks like M3U (`#EXTM3U`)
-                        // or JSON.  Avoids buffering the full 5-50 MB.
-                        val source = body.source()
-                        source.request(512)
-                        val peek = source.peek().readUtf8(
-                            minOf(512L, source.buffer.size),
-                        ).trimStart()
-                        val isJsonResponse = contentType.contains("json", ignoreCase = true) ||
-                            peek.startsWith("{") || peek.startsWith("[")
+            // Prefer player_api.php catalogue (same as IPTV Smarters Pro).
+            // M3U is fallback for raw playlists or when JSON endpoints fail.
+            var usedJson = false
+            if (isXtream) {
+                try {
+                    android.util.Log.i("SyncService", "Xtream sync via player_api (JSON)")
+                    val snapshot: XtreamSnapshot = xtreamJson.fetchAll(
+                        host = provider.host,
+                        user = provider.username,
+                        pass = provider.password,
+                        userAgent = provider.apiUserAgent(),
+                        onProgress = { status ->
+                            _progress.value = Progress.Parsing(
+                                parsed = live.size + movies.size + episodes.size +
+                                    seriesMetaToPersist.size,
+                                skipped = 0,
+                            )
+                            progressTracker.setLabel(status)
+                        },
+                    )
+                    live.addAll(snapshot.live)
+                    movies.addAll(snapshot.movies)
+                    seriesMetaToPersist = snapshot.seriesMeta
+                    diagLiveCats = snapshot.liveCategories
+                    diagVodCats = snapshot.vodCategories
+                    diagSeriesCats = snapshot.seriesCategories
+                    diagLiveProvider = snapshot.liveProviderCount
+                    diagMoviesProvider = snapshot.moviesProviderCount
+                    diagSeriesProvider = snapshot.seriesProviderCount
+                    syncPath = "xtream_json"
+                    usedJson = true
+                    progressTracker.syncComplete(
+                        live.size + movies.size + seriesMetaToPersist.size,
+                    )
+                    android.util.Log.i(
+                        "SyncService",
+                        "JSON catalogue parsed: live=${live.size} movies=${movies.size} " +
+                            "series=${seriesMetaToPersist.size} " +
+                            "cats=${diagLiveCats + diagVodCats + diagSeriesCats}",
+                    )
+                } catch (e: Throwable) {
+                    android.util.Log.w(
+                        "SyncService",
+                        "Xtream JSON sync failed, falling back to M3U: ${e.message}",
+                    )
+                    live.clear()
+                    movies.clear()
+                    seriesMetaToPersist = emptyList()
+                }
+            }
 
-                        if (isJsonResponse) {
-                            // Bail out of the M3U path; JSON branch
-                            // will issue fresh requests via
-                            // XtreamJsonClient.
-                            return@use true
-                        }
+            if (!usedJson) {
+                syncPath = "m3u"
+                withContext(Dispatchers.IO) {
+                    fetchPlaylistWithRetry(playlistUrl, provider.apiUserAgent())
+                        .use { response ->
+                            if (!response.isSuccessful) {
+                                error("HTTP ${response.code} fetching playlist")
+                            }
+                            val body = response.body ?: error("Empty playlist body")
+                            val contentType = response.header("Content-Type").orEmpty()
+                            val source = body.source()
+                            source.request(512)
+                            val peek = source.peek().readUtf8(
+                                minOf(512L, source.buffer.size),
+                            ).trimStart()
+                            val isJsonResponse = contentType.contains("json", ignoreCase = true) ||
+                                peek.startsWith("{") || peek.startsWith("[")
 
-                        // Standard M3U: stream the body line-by-line
-                        // into the parser without loading the whole
-                        // playlist as a String (Fire Stick has ~512 MB
-                        // app heap shared with ExoPlayer + Compose).
-                        body.charStream().buffered().useLines { lines ->
-                            // Stream-persist movies + episodes as they parse.
-                            // Persist runs on a separate IO coroutine drained
-                            // from a bounded Channel so the parser keeps
-                            // collecting from the network while writes happen.
-                            // Channel capacity 2 means peak in-flight buffers
-                            // are ~3 × MOVIES_FLUSH_THRESHOLD entries × 400 B
-                            // ≈ 6 MB — safely under the Fire Stick's 128 MB
-                            // heap clamp.
-                            //
-                            // useLines is `inline` so the lambda body is
-                            // inlined into the surrounding suspending function;
-                            // we can use coroutineScope / launch directly.
-                            // When this scope exits, the persist worker has
-                            // already been awaited.
-                            //
-                            // Live channels stay buffered (typically <15k, and
-                            // ChannelDeduplicator needs cross-batch view).
-                            coroutineScope {
+                            if (isJsonResponse) {
+                                if (!isXtream) {
+                                    error("Playlist URL returned JSON but Xtream credentials are missing")
+                                }
+                                // get.php returned JSON auth blob — use player_api.
+                                val snapshot: XtreamSnapshot = xtreamJson.fetchAll(
+                                    host = provider.host,
+                                    user = provider.username,
+                                    pass = provider.password,
+                                    userAgent = provider.apiUserAgent(),
+                                    onProgress = { status ->
+                                        _progress.value = Progress.Parsing(0, 0)
+                                        progressTracker.setLabel(status)
+                                    },
+                                )
+                                live.addAll(snapshot.live)
+                                movies.addAll(snapshot.movies)
+                                seriesMetaToPersist = snapshot.seriesMeta
+                                diagLiveCats = snapshot.liveCategories
+                                diagVodCats = snapshot.vodCategories
+                                diagSeriesCats = snapshot.seriesCategories
+                                diagLiveProvider = snapshot.liveProviderCount
+                                diagMoviesProvider = snapshot.moviesProviderCount
+                                diagSeriesProvider = snapshot.seriesProviderCount
+                                syncPath = "xtream_json_after_m3u_probe"
+                                progressTracker.syncComplete(
+                                    live.size + movies.size + seriesMetaToPersist.size,
+                                )
+                                return@use
+                            }
+
+                            body.charStream().buffered().useLines { lines ->
+                                coroutineScope {
                                     val persistChannel = kotlinx.coroutines.channels
                                         .Channel<PersistJob>(capacity = 2)
                                     val persistJob = launch(Dispatchers.IO) {
@@ -257,8 +278,8 @@ class SyncService @Inject constructor(
                                         parser.parseLines(lines).collect { result ->
                                             when (result) {
                                                 is ParseResult.Batch -> {
+                                                    // Store everything — no region/language drop here.
                                                     for (entry in result.entries) {
-                                                        if (isExcluded(entry)) continue
                                                         when (entry.contentType) {
                                                             ContentType.Live -> live.add(entry)
                                                             ContentType.Movie -> {
@@ -284,9 +305,14 @@ class SyncService @Inject constructor(
                                                     progressTracker.syncAdvance(result.entries.size)
                                                 }
                                                 is ParseResult.Progress -> {
-                                                    _progress.value = Progress.Parsing(result.parsed, result.skipped)
+                                                    m3uParsedTotal = result.parsed
+                                                    _progress.value = Progress.Parsing(
+                                                        result.parsed,
+                                                        result.skipped,
+                                                    )
                                                 }
                                                 is ParseResult.Complete -> {
+                                                    m3uParsedTotal = result.totalParsed
                                                     progressTracker.syncComplete(result.totalParsed)
                                                 }
                                             }
@@ -303,70 +329,20 @@ class SyncService @Inject constructor(
                                         persistChannel.close()
                                         persistJob.join()
                                     }
+                                }
                             }
                         }
-                        false
-                    }
-            }
-
-            var seriesMetaToPersist: List<com.strata.tv.data.xtream.XtreamSeriesMeta> = emptyList()
-            if (useJsonApi) {
-                val host = provider.host
-                val user = provider.username
-                val pass = provider.password
-                if (host.isBlank() || user.isBlank() || pass.isBlank()) {
-                    error(
-                        "Provider returned JSON from get.php but no Xtream " +
-                            "credentials are configured; cannot fall back",
-                    )
                 }
-                val snapshot: XtreamSnapshot = xtreamJson.fetchAll(
-                    host = host,
-                    user = user,
-                    pass = pass,
-                    userAgent = provider.apiUserAgent(),
-                    onProgress = { status ->
-                        _progress.value = Progress.Parsing(
-                            parsed = live.size + movies.size + episodes.size,
-                            skipped = 0,
-                        )
-                        progressTracker.setLabel(status)
-                    },
-                )
-                for (entry in snapshot.live) if (!isExcluded(entry)) live.add(entry)
-                for (entry in snapshot.movies) if (!isExcluded(entry)) movies.add(entry)
-                // Episodes are lazy-loaded per series at detail-screen
-                // open time — we just persist the catalogue here.
-                seriesMetaToPersist = snapshot.seriesMeta.filter { meta ->
-                    if (countryWhitelist.isNotEmpty() && meta.groupTitle.contains('|')) {
-                        val prefix = meta.groupTitle.substringBefore('|').trim().uppercase()
-                        if (prefix.isNotEmpty() && prefix !in countryWhitelist) return@filter false
-                    }
-                    // Foreign-language categories with no "|" prefix
-                    // (German / Hindi / Thai / …) — the main reason
-                    // non-English shows leaked past the country filter.
-                    if (ForeignContentFilter.shouldExclude(meta.groupTitle, countryWhitelist)) {
-                        return@filter false
-                    }
-                    if (excludedCategories.isNotEmpty()) {
-                        val g = meta.groupTitle.lowercase()
-                        if (excludedCategories.any { needle -> g.contains(needle) }) return@filter false
-                    }
-                    true
-                }
-                progressTracker.syncComplete(
-                    live.size + movies.size + episodes.size + seriesMetaToPersist.size,
-                )
             }
 
             _progress.value = Progress.PostProcessing
 
+            val liveParsed = live.size
+            val moviesParsed = movies.size
+            val seriesParsed = seriesMetaToPersist.size
+
             persistLive(live, sourceId, playlistUrl)
             live.clear()
-            // movies/episodes are only populated on the JSON-API path
-            // (XtreamSnapshot already in memory).  For the M3U path
-            // they're empty here because we stream-persisted during
-            // parse to keep peak heap under the Fire Stick's 128 MB clamp.
             if (movies.isNotEmpty()) {
                 persistMovies(movies, sourceId, playlistUrl)
                 movies.clear()
@@ -377,28 +353,71 @@ class SyncService @Inject constructor(
             }
             persistSeriesCatalogue(seriesMetaToPersist)
 
-            // Re-apply language / genre / year filters after every sync.
-            // @Upsert resets hidden=false on every row, so already-enriched
-            // foreign content would reappear without this call.
-            // Wrapped in runCatching: this is best-effort cleanup; if it
-            // fails (e.g. low memory after a huge sync) the sync still
-            // counts as Done and the user can use the app.  A failure
-            // here just means foreign content might show until the next
-            // settings change re-triggers the recompute.
+            // Presentation filters only (hidden flags). Never delete rows.
             runCatching { libraryFilter.recomputeHiddenFlags() }
                 .onFailure { e ->
                     android.util.Log.w("SyncService", "recomputeHiddenFlags failed: ${e.message}", e)
                 }
 
+            val liveStored = channelDao.watchCount().first()
+            val moviesStored = movieDao.countAll()
+            val seriesStored = seriesDao.countAll()
+            val moviesVisible = movieDao.countVisible()
+            val seriesVisible = seriesDao.countVisible()
+            val settingsNow = settingsRepo.current()
+            val liveContent = contentDao.byType("live")
+            val liveVisible = liveContent.count { item ->
+                CategoryRegion.matchesRegion(item.groupTitle, settingsNow.countryWhitelist) &&
+                    !CategoryRegion.matchesExcludedCategory(
+                        item.groupTitle,
+                        settingsNow.excludedCategories,
+                    )
+            }
+            val hiddenByRegion = liveContent.count {
+                !CategoryRegion.matchesRegion(it.groupTitle, settingsNow.countryWhitelist)
+            } + (moviesStored - moviesVisible).coerceAtLeast(0)
+
+            diagnosticsStore.update(
+                SyncDiagnostics(
+                    lastSyncAt = Instant.now(),
+                    lastError = null,
+                    syncPath = syncPath,
+                    liveCategories = diagLiveCats,
+                    vodCategories = diagVodCats,
+                    seriesCategories = diagSeriesCats,
+                    totalCategories = diagLiveCats + diagVodCats + diagSeriesCats,
+                    liveProvider = if (diagLiveProvider > 0) diagLiveProvider else liveParsed,
+                    liveParsed = liveParsed,
+                    liveStored = liveStored,
+                    liveVisible = liveVisible,
+                    moviesProvider = if (diagMoviesProvider > 0) diagMoviesProvider else moviesParsed,
+                    moviesParsed = moviesParsed,
+                    moviesStored = moviesStored,
+                    moviesVisible = moviesVisible,
+                    seriesProvider = if (diagSeriesProvider > 0) diagSeriesProvider else seriesParsed,
+                    seriesParsed = seriesParsed,
+                    seriesStored = seriesStored,
+                    seriesVisible = seriesVisible,
+                    hiddenByRegion = hiddenByRegion,
+                    hiddenByCategory = 0,
+                    hiddenByLanguage = (moviesStored - moviesVisible).coerceAtLeast(0),
+                    hiddenCategoriesEstimate = settingsNow.excludedCategories.size,
+                ),
+            )
+            android.util.Log.i(
+                "SyncService",
+                "Sync done path=$syncPath " +
+                    "live=$liveParsed→$liveStored vis=$liveVisible " +
+                    "movies=$moviesParsed→$moviesStored vis=$moviesVisible " +
+                    "series=$seriesParsed→$seriesStored vis=$seriesVisible " +
+                    "m3uLines=$m3uParsedTotal",
+            )
+
             _progress.value = Progress.Done(
-                totalParsed = live.size + movies.size + episodes.size,
+                totalParsed = liveParsed + moviesParsed + seriesParsed,
                 totalSkipped = 0,
             )
         } catch (e: Throwable) {
-            // Build a useful message: outer class + outer message +
-            // root cause class + root cause message.  Avoids the
-            // dreaded "null" surfaces from exceptions whose message
-            // field happens to be empty.
             val rootCause = generateSequence(e) { it.cause }.last()
             val msg = buildString {
                 append(e::class.simpleName ?: "Throwable")
@@ -410,6 +429,12 @@ class SyncService @Inject constructor(
                     append(")")
                 }
             }
+            diagnosticsStore.update(
+                diagnosticsStore.snapshot.value.copy(
+                    lastSyncAt = Instant.now(),
+                    lastError = msg,
+                ),
+            )
             _progress.value = Progress.Error(msg)
             throw e
         }

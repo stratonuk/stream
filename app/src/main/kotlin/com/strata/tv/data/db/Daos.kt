@@ -199,7 +199,7 @@ interface MovieDao {
         FROM movies WHERE hidden = 0
           AND (year IS NULL OR year BETWEEN 1900 AND 2030)
         ORDER BY year DESC
-        LIMIT 500
+        LIMIT 20000
         """,
     )
     fun watchAllForList(): Flow<List<MovieListItem>>
@@ -412,6 +412,12 @@ interface MovieDao {
 
     @Query("SELECT COUNT(*) FROM movies WHERE hidden = 0")
     fun watchVisibleCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM movies")
+    suspend fun countAll(): Int
+
+    @Query("SELECT COUNT(*) FROM movies WHERE hidden = 0")
+    suspend fun countVisible(): Int
 
     /** All movies including hidden variants — used by [MovieDeduplicator]. */
     @Query("SELECT * FROM movies")
@@ -692,6 +698,12 @@ interface SeriesDao {
 
     @Query("SELECT COUNT(*) FROM series WHERE hidden = 0")
     fun watchCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM series")
+    suspend fun countAll(): Int
+
+    @Query("SELECT COUNT(*) FROM series WHERE hidden = 0")
+    suspend fun countVisible(): Int
 
     /**
      * Mark the new-episodes badge as cleared for [seriesTitle] by setting

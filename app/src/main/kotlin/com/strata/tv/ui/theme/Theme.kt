@@ -3,6 +3,7 @@ package com.strata.tv.ui.theme
 import androidx.compose.runtime.Composable
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.ProvideTextStyle
 import androidx.tv.material3.darkColorScheme
 
 /**
@@ -13,6 +14,10 @@ import androidx.tv.material3.darkColorScheme
  * Material 3 [androidx.tv.material3.ColorScheme] so out-of-the-box
  * components — buttons, focus rings, surfaces — get the right colours
  * without per-call overrides.
+ *
+ * Typography is Inter (body) + Inter Display (headlines) app-wide.
+ * Apple SF Pro cannot be redistributed on Android; Inter is the
+ * open-source SF-compatible pairing.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -33,6 +38,10 @@ fun StrataTheme(content: @Composable () -> Unit) {
             error = StrataColors.StatusError,
             border = StrataColors.SurfaceOverlay,
         ),
-        content = content,
-    )
+        typography = StrataTypography,
+    ) {
+        // Ensure every ad-hoc Text(fontSize=…) that never sets fontFamily
+        // still renders in Inter (merges with LocalTextStyle).
+        ProvideTextStyle(value = StrataDefaultTextStyle, content = content)
+    }
 }

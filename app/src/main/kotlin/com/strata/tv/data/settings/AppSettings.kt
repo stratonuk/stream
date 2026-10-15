@@ -56,8 +56,10 @@ data class AppSettings(
     companion object {
         /**
          * Default country whitelist.  UK + GB both appear in real IPTV
-         * playlists (some providers use the country code, others the
-         * cultural name).  Empty out to accept all countries.
+         * playlists.  EN-labelled packs (`EN | Movies`) are accepted too
+         * via [com.strata.tv.domain.CategoryRegion] affinity — they are
+         * not the same token as UK, but UK-first mode must keep them.
+         * Empty whitelist = accept all countries (presentation only).
          */
         val DEFAULT_COUNTRY_WHITELIST: Set<String> = setOf("UK", "GB")
 

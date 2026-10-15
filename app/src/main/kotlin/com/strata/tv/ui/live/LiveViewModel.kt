@@ -11,6 +11,8 @@ import com.strata.tv.data.db.ProgrammeDao
 import com.strata.tv.data.db.ProgrammeEntity
 import com.strata.tv.data.epg.EpgChannelMatcher
 import com.strata.tv.data.repo.EpgFetchService
+import com.strata.tv.data.settings.SettingsRepository
+import com.strata.tv.domain.CategoryRegion
 import com.strata.tv.domain.ChannelCategorizer
 import com.strata.tv.domain.ChannelDeduplicator
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -50,6 +52,7 @@ class LiveViewModel @Inject constructor(
     private val contentDao: ContentDao,
     internal val programmeDao: ProgrammeDao,
     private val epgFetchService: EpgFetchService,
+    private val settingsRepo: SettingsRepository,
 ) : ViewModel() {
 
     companion object {
@@ -141,6 +144,15 @@ class LiveViewModel @Inject constructor(
                 .collect {
                     refreshGuide()
                 }
+        }
+
+        // Region / excluded-category changes are presentation-only —
+        // re-filter the already-stored catalogue without re-syncing.
+        viewModelScope.launch(Dispatchers.IO) {
+            settingsRepo.settings
+                .map { it.countryWhitelist to it.excludedCategories }
+                .distinctUntilChanged()
+                .collect { refreshGuide() }
         }
 
         // 2. EPG fetch in parallel — when done, refresh to overlay
@@ -293,12 +305,24 @@ class LiveViewModel @Inject constructor(
             val channels = channelDao.watchAll().first()
             val liveContent = contentDao.byType("live")
             val contentByContentId = liveContent.associateBy { it.contentId }
+            val settings = settingsRepo.current()
 
             val phase1 = mutableListOf<ChannelWithGuide>()
             val categorySet = mutableSetOf<String>()
 
             for (channel in channels) {
                 val content = contentByContentId[channel.contentId] ?: continue
+                // Presentation filter — rows stay in Room for Region=All.
+                if (!CategoryRegion.matchesRegion(content.groupTitle, settings.countryWhitelist)) {
+                    continue
+                }
+                if (CategoryRegion.matchesExcludedCategory(
+                        content.groupTitle,
+                        settings.excludedCategories,
+                    )
+                ) {
+                    continue
+                }
                 val displayName = ChannelDeduplicator.cleanChannelName(content.displayName)
 
                 // Re-derive categories on-the-fly so rule updates apply
