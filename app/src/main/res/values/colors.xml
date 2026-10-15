@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  STREAM monochrome tokens for XML themes / launcher / splash.
+  Compose uses StrataColors.kt (same palette).
+-->
+<resources>
+    <color name="strata_bg_top">#08090B</color>
+    <color name="strata_bg_mid">#101114</color>
+    <color name="strata_bg_bottom">#191B1F</color>
+    <color name="strata_glow">#303238</color>
+    <color name="strata_accent_cyan">#A8AAB0</color>
+    <color name="strata_accent_blue">#A8AAB0</color>
+    <color name="strata_accent_purple">#D7D9DD</color>
+    <color name="strata_accent_pink">#D7D9DD</color>
+    <color name="strata_accent_magenta">#D7D9DD</color>
+
+    <color name="ic_launcher_background">#08090B</color>
+
+    <color name="strata_surface_void">#08090B</color>
+    <color name="strata_accent_primary">#FFFFFF</color>
+    <color name="strata_accent_secondary">#A8AAB0</color>
+</resources>
